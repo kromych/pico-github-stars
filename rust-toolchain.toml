@@ -1,0 +1,3 @@
+[toolchain]
+components = ["rust-src", "rustfmt", "llvm-tools"]
+targets = ["thumbv6m-none-eabi"]
