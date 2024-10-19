@@ -155,8 +155,8 @@ async fn main(spawner: Spawner) {
     // And now we can use it!
 
     let mut rx_buffer = [0; 8192];
-    let mut tls_read_buffer = [0; 8192];
-    let mut tls_write_buffer = [0; 8192];
+    let mut tls_read_buffer = [0; 16640];
+    let mut tls_write_buffer = [0; 16640];
 
     let client_state = TcpClientState::<2, 8192, 8192>::new();
     let tcp_client = TcpClient::new(stack, &client_state);
