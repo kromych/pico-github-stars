@@ -43,6 +43,27 @@ async fn cyw43_task(
 async fn net_task(runner: &'static embassy_net::Stack<cyw43::NetDriver<'static>>) -> ! {
     runner.run().await
 }
+fn process_data(body: &str) {
+    info!("Response body: {:?}", &body);
+
+    // Parse the response body
+
+    #[derive(Deserialize)]
+    struct ApiResponse {
+        stargazers_count: u32,
+        // other fields as needed
+    }
+
+    let bytes = body.as_bytes();
+    match serde_json_core::de::from_slice::<ApiResponse>(bytes) {
+        Ok((output, _used)) => {
+            info!("STARS: {:?}", output.stargazers_count);
+        }
+        Err(_e) => {
+            error!("Failed to parse response body");
+        }
+    }
+}
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -94,7 +115,7 @@ async fn main(spawner: Spawner) {
     // Generate random seed
     let seed = rng.next_u64();
 
-    static RESOURCES: StaticCell<embassy_net::StackResources<2>> = StaticCell::new();
+    static RESOURCES: StaticCell<embassy_net::StackResources<32>> = StaticCell::new();
     static STACK: StaticCell<embassy_net::Stack<cyw43::NetDriver>> = StaticCell::new();
     let stack = &*STACK.init(embassy_net::Stack::new(
         net_device,
@@ -133,67 +154,40 @@ async fn main(spawner: Spawner) {
 
     // And now we can use it!
 
+    let mut rx_buffer = [0; 8192];
+    let mut tls_read_buffer = [0; 8192];
+    let mut tls_write_buffer = [0; 8192];
+
+    let client_state = TcpClientState::<2, 8192, 8192>::new();
+    let tcp_client = TcpClient::new(stack, &client_state);
+    let dns_client = DnsSocket::new(stack);
     loop {
-        let mut rx_buffer = [0; 8192];
-        let mut tls_read_buffer = [0; 16640];
-        let mut tls_write_buffer = [0; 16640];
-
-        let client_state = TcpClientState::<1, 1024, 1024>::new();
-        let tcp_client = TcpClient::new(stack, &client_state);
-        let dns_client = DnsSocket::new(stack);
-        let tls_config = TlsConfig::new(
-            seed,
-            &mut tls_read_buffer,
-            &mut tls_write_buffer,
-            TlsVerify::None,
-        );
-
-        let mut http_client = HttpClient::new_with_tls(&tcp_client, &dns_client, tls_config);
-
         info!("connecting to {}", &URL);
 
-        let mut request = match http_client.request(Method::GET, URL).await {
-            Ok(req) => req,
-            Err(e) => {
-                error!("Failed to make HTTP request: {:?}", e);
-                return; // handle the error
-            }
-        };
-
-        let response = match request.send(&mut rx_buffer).await {
-            Ok(resp) => resp,
-            Err(_e) => {
-                error!("Failed to send HTTP request");
-                return; // handle the error;
-            }
-        };
-
-        let body = match from_utf8(response.body().read_to_end().await.unwrap()) {
-            Ok(b) => b,
-            Err(_e) => {
-                error!("Failed to read response body");
-                return; // handle the error
-            }
-        };
-        info!("Response body: {:?}", &body);
-
-        // Parse the response body
-
-        #[derive(Deserialize)]
-        struct ApiResponse {
-            stargazers_count: u32,
-            // other fields as needed
-        }
-
-        let bytes = body.as_bytes();
-        match serde_json_core::de::from_slice::<ApiResponse>(bytes) {
-            Ok((output, _used)) => {
-                info!("STARS: {:?}", output.stargazers_count);
-            }
-            Err(_e) => {
-                error!("Failed to parse response body");
-                return; // handle the error
-            }
+        let mut http_client = HttpClient::new_with_tls(
+            &tcp_client,
+            &dns_client,
+            TlsConfig::new(
+                seed,
+                &mut tls_read_buffer,
+                &mut tls_write_buffer,
+                TlsVerify::None,
+            ),
+        );
+        match http_client.request(Method::GET, URL).await {
+            Ok(mut req) => match req.send(&mut rx_buffer).await {
+                Ok(resp) => match resp.body().read_to_end().await {
+                    Ok(bytes) => match from_utf8(bytes) {
+                        Ok(b) => process_data(b),
+                        Err(_e) => {
+                            error!("Failed to read response body");
+                        }
+                    },
+                    Err(e) => error!("Failed to read response body: {:?}", e),
+                },
+                Err(e) => error!("Failed to send HTTP request: {:?}", e),
+            },
+            Err(e) => error!("Failed to make HTTP request: {:?}", e),
         }
 
         Timer::after(Duration::from_secs(5)).await;
