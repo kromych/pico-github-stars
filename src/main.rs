@@ -2,27 +2,27 @@
 #![no_main]
 #![allow(async_fn_in_trait)]
 
-use core::str::from_utf8;
-
 use cyw43_pio::PioSpi;
+use defmt::*;
+use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_net::dns::DnsSocket;
-use embassy_net::tcp::client::{TcpClient, TcpClientState};
-use embassy_net::Config;
+use embassy_net::tcp::TcpSocket;
+use embassy_net::{Config, IpAddress, IpEndpoint, Ipv4Address};
 use embassy_rp::bind_interrupts;
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIO0};
 use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_time::{Duration, Timer};
-use rand::RngCore;
-use reqwless::client::{HttpClient, TlsConfig, TlsVerify};
-use reqwless::request::Method;
+use embedded_io_async::Write;
+use embedded_nal_async::{AddrType, Dns, IpAddr};
+use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
+use panic_probe as _;
+use rand::{RngCore, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use serde::Deserialize;
 use static_cell::StaticCell;
-
-use defmt::*;
-use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
@@ -30,7 +30,14 @@ bind_interrupts!(struct Irqs {
 
 const WIFI_NETWORK: &str = env!("WIFI_NETWORK");
 const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
-const URL: &str = env!("URL");
+const HOST: &str = env!("HOST");
+const REQ_HEADERS: &[u8] = b"GET /repos/kromych/pico-github-stars HTTP/1.1\r\n\
+Host: api.github.com\r\n\
+User-Agent: kromych/pico-github-stars\r\n\
+Accept: application/vnd.github+json\r\n\
+X-GitHub-Api-Version:2022-11-28\r\n\
+Connection: close\r\n\
+\r\n";
 
 #[embassy_executor::task]
 async fn cyw43_task(
@@ -152,43 +159,53 @@ async fn main(spawner: Spawner) {
     stack.wait_config_up().await;
     info!("Stack is up!");
 
-    // And now we can use it!
-
-    let mut rx_buffer = [0; 8192];
-    let mut tls_read_buffer = [0; 16640];
-    let mut tls_write_buffer = [0; 16640];
-
-    let client_state = TcpClientState::<2, 8192, 8192>::new();
-    let tcp_client = TcpClient::new(stack, &client_state);
     let dns_client = DnsSocket::new(stack);
     loop {
-        info!("connecting to {}", &URL);
+        let mut rx_buffer = [0; 8192];
+        let mut tx_buffer = [0; 8192];
 
-        let mut http_client = HttpClient::new_with_tls(
-            &tcp_client,
-            &dns_client,
-            TlsConfig::new(
-                seed,
-                &mut tls_read_buffer,
-                &mut tls_write_buffer,
-                TlsVerify::None,
-            ),
-        );
-        match http_client.request(Method::GET, URL).await {
-            Ok(mut req) => match req.send(&mut rx_buffer).await {
-                Ok(resp) => match resp.body().read_to_end().await {
-                    Ok(bytes) => match from_utf8(bytes) {
-                        Ok(b) => process_data(b),
-                        Err(_e) => {
-                            error!("Failed to read response body");
-                        }
-                    },
-                    Err(e) => error!("Failed to read response body: {:?}", e),
-                },
-                Err(e) => error!("Failed to send HTTP request: {:?}", e),
-            },
-            Err(e) => error!("Failed to make HTTP request: {:?}", e),
+        info!("resolving {}", &HOST);
+        let remote_addr = dns_client
+            .get_host_by_name(HOST, AddrType::IPv4)
+            .await
+            .unwrap();
+        let remote_endpoint = match remote_addr {
+            IpAddr::V4(addr) => IpEndpoint::new(IpAddress::Ipv4(Ipv4Address(addr.octets())), 443),
+            _ => defmt::unreachable!("IPv6 not supported"),
+        };
+        info!("connecting to {}", &HOST);
+
+        let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+
+        socket.set_timeout(Some(Duration::from_secs(10)));
+
+        let r = socket.connect(remote_endpoint).await;
+        if let Err(e) = r {
+            warn!("connect error: {:?}", e);
+            return;
         }
+        log::info!("TCP connected!");
+
+        let mut read_record_buffer = [0; 16384];
+        let mut write_record_buffer = [0; 16384];
+        let config = TlsConfig::new();
+        let mut tls = TlsConnection::new(socket, &mut read_record_buffer, &mut write_record_buffer);
+        tls.open(TlsContext::new(
+            &config,
+            UnsecureProvider::new::<Aes128GcmSha256>(ChaCha8Rng::seed_from_u64(seed)),
+        ))
+        .await
+        .expect("error establishing TLS connection");
+
+        tls.write_all(REQ_HEADERS)
+            .await
+            .expect("error writing data");
+        tls.flush().await.expect("error flushing data");
+
+        let mut rx_buf = [0; 128];
+        let sz = tls.read(&mut rx_buf[..]).await.expect("error reading data");
+
+        log::info!("Read {} bytes: {:?}", sz, &rx_buf[..sz]);
 
         Timer::after(Duration::from_secs(5)).await;
     }

@@ -8,4 +8,4 @@ target = "thumbv6m-none-eabi"        # Cortex-M0 and Cortex-M0+
 DEFMT_LOG = "info"
 WIFI_NETWORK = "ssid"
 WIFI_PASSWORD = "pwd"
-URL = "https://api.github.com/repos/microsoft/openvmm"
+HOST = "api.github.com"
