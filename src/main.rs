@@ -17,7 +17,9 @@ use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_time::{Duration, Timer};
 use embedded_io_async::Write;
 use embedded_nal_async::{AddrType, Dns, IpAddr};
-use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
+use embedded_tls::{
+    Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, TlsError, UnsecureProvider,
+};
 use panic_probe as _;
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -54,7 +56,7 @@ async fn net_task(runner: &'static embassy_net::Stack<cyw43::NetDriver<'static>>
 
 #[allow(dead_code)]
 fn process_data(body: &str) {
-    info!("Response body: {:?}", &body);
+    debug!("Response body: {:?}", &body);
 
     #[derive(Deserialize)]
     struct ApiResponse {
@@ -65,7 +67,7 @@ fn process_data(body: &str) {
     let bytes = body.as_bytes();
     match serde_json_core::de::from_slice::<ApiResponse>(bytes) {
         Ok((output, _used)) => {
-            info!("STARS: {:?}", output.stargazers_count);
+            debug!("STARS: {:?}", output.stargazers_count);
         }
         Err(_e) => {
             error!("Failed to parse response body");
@@ -105,23 +107,33 @@ async fn initialize_network_stack(
     let fw = include_bytes!("../cyw43-firmware/43439A0.bin");
     let clm = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
 
+    info!("Initializing CYW43...");
+
     let state = STATE.init(cyw43::State::new());
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
     unwrap!(spawner.spawn(cyw43_task(runner)));
+
+    info!("CYW43 initialized!");
+    info!("Initializing CYW43 firmware...");
 
     control.init(clm).await;
     control
         .set_power_management(cyw43::PowerManagementMode::PowerSave)
         .await;
 
+    info!("CYW43 firmware initialized!");
+    info!("Joining WiFi network...");
+
     loop {
         match control.join_wpa2(WIFI_NETWORK, WIFI_PASSWORD).await {
             Ok(_) => break,
             Err(err) => {
-                info!("join failed with status={}", err.status);
+                warn!("join failed with status={}", err.status);
             }
         }
     }
+
+    info!("WiFi network joined!");
 
     let seed = rng.next_u64();
     let stack = &*STACK.init(embassy_net::Stack::new(
@@ -162,7 +174,7 @@ async fn read_data_from_rest_api(
     let mut rx_buffer = [0; 8192];
     let mut tx_buffer = [0; 8192];
 
-    info!("resolving {}", HOST);
+    debug!("resolving {}", HOST);
     let remote_addr = dns_client
         .get_host_by_name(HOST, AddrType::IPv4)
         .await
@@ -172,7 +184,7 @@ async fn read_data_from_rest_api(
         IpAddr::V4(addr) => IpEndpoint::new(IpAddress::Ipv4(Ipv4Address(addr.octets())), 443),
         _ => defmt::unreachable!("IPv6 not supported"),
     };
-    info!("connecting to {}", remote_endpoint);
+    debug!("connecting to {}", remote_endpoint);
 
     let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
     socket.set_timeout(Some(Duration::from_secs(10)));
@@ -182,7 +194,7 @@ async fn read_data_from_rest_api(
         warn!("connect error: {:?}", e);
         return;
     }
-    log::info!("TCP connected!");
+    log::debug!("TCP connected!");
 
     let mut read_record_buffer = [0; 16640];
     let mut write_record_buffer = [0; 16640];
@@ -202,9 +214,72 @@ async fn read_data_from_rest_api(
     tls.flush().await.expect("error flushing data");
 
     let mut rx_buf = [0; 16384];
-    let sz = tls.read(&mut rx_buf[..]).await.expect("error reading data");
+    let sz = {
+        let mut pos = 0;
+        loop {
+            let sz = match tls.read(&mut rx_buf[pos..]).await {
+                Ok(sz) => sz,
+                Err(TlsError::ConnectionClosed) => {
+                    debug!("Connection closed by the server");
+                    break;
+                }
+                Err(e) => {
+                    error!("read error: {:?}", e);
+                    return;
+                }
+            };
+            if sz == 0 {
+                break;
+            }
+            pos += sz;
+        }
+        info!("Read {} bytes from the server", pos);
+        pos
+    };
 
-    info!("Read {} bytes", sz);
+    let mut pos = 0;
+    while pos < sz {
+        let tail = &rx_buf[pos..];
+        let line_end = match tail.iter().position(|&c| c == b'\n') {
+            Some(i) => i,
+            None => {
+                warn!("no newline found");
+                break;
+            }
+        };
+
+        let line = &rx_buf[pos..pos + line_end];
+        let line = match core::str::from_utf8(line) {
+            Ok(line) => line,
+            Err(_) => {
+                warn!("invalid utf8");
+                continue;
+            }
+        };
+        if !line.ends_with('\r') {
+            warn!("no CR found");
+            return;
+        }
+        let line = &line[..line.len() - 1];
+
+        if pos == 0 {
+            if !line.starts_with("HTTP/1.1 2") {
+                error!("HTTP error: {:?}", line);
+            } else {
+                info!("HTTP status: {:?}", line);
+            }
+        } else if !line.is_empty() {
+            debug!("HTTP header: {:?}", line);
+        }
+
+        // Skip the CRLF.
+        pos += line.len() + 2;
+
+        if line.is_empty() {
+            info!("Size of headers: {}", pos);
+            break;
+        }
+    }
 }
 
 #[embassy_executor::main]
@@ -221,11 +296,14 @@ async fn main(spawner: Spawner) {
 
     loop {
         read_data_from_rest_api(stack, rng.next_u64()).await;
-        Timer::after(Duration::from_secs(
-            env!("SLEEP_TIME_SEC")
-                .parse()
-                .unwrap_or(DEFAULT_SLEEP_TIME_SEC),
-        ))
-        .await;
+
+        let sleep_sec = env!("SLEEP_TIME_SEC")
+            .parse()
+            .unwrap_or(DEFAULT_SLEEP_TIME_SEC);
+
+        // Randomize sleep time to hopefully make it easier for the server.
+        let sleep_sec = sleep_sec + (rng.next_u32() % (DEFAULT_SLEEP_TIME_SEC as u32)) as u64;
+        info!("Sleeping for {} seconds", sleep_sec);
+        Timer::after(Duration::from_secs(sleep_sec)).await;
     }
 }
