@@ -50,10 +50,10 @@ async fn cyw43_task(
 async fn net_task(runner: &'static embassy_net::Stack<cyw43::NetDriver<'static>>) -> ! {
     runner.run().await
 }
+
+#[allow(dead_code)]
 fn process_data(body: &str) {
     info!("Response body: {:?}", &body);
-
-    // Parse the response body
 
     #[derive(Deserialize)]
     struct ApiResponse {
@@ -72,22 +72,13 @@ fn process_data(body: &str) {
     }
 }
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
-    info!("Hello World!");
+// Static cells for holding state, resources, and stack
+static STATE: StaticCell<cyw43::State> = StaticCell::new();
+static RESOURCES: StaticCell<embassy_net::StackResources<32>> = StaticCell::new();
+static STACK: StaticCell<embassy_net::Stack<cyw43::NetDriver>> = StaticCell::new();
 
+fn initialize_peripherals() -> (Output<'static>, PioSpi<'static, PIO0, 0, DMA_CH0>, RoscRng) {
     let p = embassy_rp::init(Default::default());
-    let mut rng = RoscRng;
-
-    let fw = include_bytes!("../cyw43-firmware/43439A0.bin");
-    let clm = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
-    // To make flashing faster for development, you may want to flash the firmwares independently
-    // at hardcoded addresses, instead of baking them into the program with `include_bytes!`:
-    //     probe-rs download 43439A0.bin --binary-format bin --chip RP2040 --base-address 0x10100000
-    //     probe-rs download 43439A0_clm.bin --binary-format bin --chip RP2040 --base-address 0x10140000
-    // let fw = unsafe { core::slice::from_raw_parts(0x10100000 as *const u8, 230321) };
-    // let clm = unsafe { core::slice::from_raw_parts(0x10140000 as *const u8, 4752) };
-
     let pwr = Output::new(p.PIN_23, Level::Low);
     let cs = Output::new(p.PIN_25, Level::High);
     let mut pio = Pio::new(p.PIO0, Irqs);
@@ -100,8 +91,19 @@ async fn main(spawner: Spawner) {
         p.PIN_29,
         p.DMA_CH0,
     );
+    let rng = RoscRng;
+    (pwr, spi, rng)
+}
 
-    static STATE: StaticCell<cyw43::State> = StaticCell::new();
+async fn initialize_network_stack(
+    spawner: Spawner,
+    pwr: Output<'static>,
+    spi: PioSpi<'static, PIO0, 0, DMA_CH0>,
+    rng: &mut RoscRng,
+) -> &'static embassy_net::Stack<cyw43::NetDriver<'static>> {
+    let fw = include_bytes!("../cyw43-firmware/43439A0.bin");
+    let clm = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
+
     let state = STATE.init(cyw43::State::new());
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
     unwrap!(spawner.spawn(cyw43_task(runner)));
@@ -110,28 +112,6 @@ async fn main(spawner: Spawner) {
     control
         .set_power_management(cyw43::PowerManagementMode::PowerSave)
         .await;
-
-    let config = Config::dhcpv4(Default::default());
-    // Use static IP configuration instead of DHCP
-    //let config = embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4 {
-    //    address: Ipv4Cidr::new(Ipv4Address::new(192, 168, 69, 2), 24),
-    //    dns_servers: Vec::new(),
-    //    gateway: Some(Ipv4Address::new(192, 168, 69, 1)),
-    //});
-
-    // Generate random seed
-    let seed = rng.next_u64();
-
-    static RESOURCES: StaticCell<embassy_net::StackResources<32>> = StaticCell::new();
-    static STACK: StaticCell<embassy_net::Stack<cyw43::NetDriver>> = StaticCell::new();
-    let stack = &*STACK.init(embassy_net::Stack::new(
-        net_device,
-        config,
-        RESOURCES.init(embassy_net::StackResources::new()),
-        seed,
-    ));
-    // Launch network task that runs `stack.run().await`
-    spawner.spawn(net_task(stack)).unwrap();
 
     loop {
         match control.join_wpa2(WIFI_NETWORK, WIFI_PASSWORD).await {
@@ -142,7 +122,19 @@ async fn main(spawner: Spawner) {
         }
     }
 
-    // Wait for DHCP, not necessary when using static IP
+    let seed = rng.next_u64();
+    let stack = &*STACK.init(embassy_net::Stack::new(
+        net_device,
+        Config::dhcpv4(Default::default()),
+        RESOURCES.init(embassy_net::StackResources::new()),
+        seed,
+    ));
+
+    spawner.spawn(net_task(stack)).unwrap();
+    stack
+}
+
+async fn wait_for_network(stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>) {
     info!("waiting for DHCP...");
     while !stack.is_config_up() {
         Timer::after_millis(100).await;
@@ -158,55 +150,76 @@ async fn main(spawner: Spawner) {
     info!("waiting for stack to be up...");
     stack.wait_config_up().await;
     info!("Stack is up!");
+}
 
+async fn read_data_from_rest_api(
+    stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>,
+    seed: u64,
+) {
     let dns_client = DnsSocket::new(stack);
-    loop {
-        let mut rx_buffer = [0; 8192];
-        let mut tx_buffer = [0; 8192];
 
-        info!("resolving {}", &HOST);
-        let remote_addr = dns_client
-            .get_host_by_name(HOST, AddrType::IPv4)
-            .await
-            .unwrap();
-        let remote_endpoint = match remote_addr {
-            IpAddr::V4(addr) => IpEndpoint::new(IpAddress::Ipv4(Ipv4Address(addr.octets())), 443),
-            _ => defmt::unreachable!("IPv6 not supported"),
-        };
-        info!("connecting to {}", &HOST);
+    let mut rx_buffer = [0; 8192];
+    let mut tx_buffer = [0; 8192];
 
-        let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
-
-        socket.set_timeout(Some(Duration::from_secs(10)));
-
-        let r = socket.connect(remote_endpoint).await;
-        if let Err(e) = r {
-            warn!("connect error: {:?}", e);
-            return;
-        }
-        log::info!("TCP connected!");
-
-        let mut read_record_buffer = [0; 16384];
-        let mut write_record_buffer = [0; 16384];
-        let config = TlsConfig::new();
-        let mut tls = TlsConnection::new(socket, &mut read_record_buffer, &mut write_record_buffer);
-        tls.open(TlsContext::new(
-            &config,
-            UnsecureProvider::new::<Aes128GcmSha256>(ChaCha8Rng::seed_from_u64(seed)),
-        ))
+    info!("resolving {}", &HOST);
+    let remote_addr = dns_client
+        .get_host_by_name(HOST, AddrType::IPv4)
         .await
-        .expect("error establishing TLS connection");
+        .unwrap();
 
-        tls.write_all(REQ_HEADERS)
-            .await
-            .expect("error writing data");
-        tls.flush().await.expect("error flushing data");
+    let remote_endpoint = match remote_addr {
+        IpAddr::V4(addr) => IpEndpoint::new(IpAddress::Ipv4(Ipv4Address(addr.octets())), 443),
+        _ => defmt::unreachable!("IPv6 not supported"),
+    };
+    info!("connecting to {}", &HOST);
 
-        let mut rx_buf = [0; 128];
-        let sz = tls.read(&mut rx_buf[..]).await.expect("error reading data");
+    let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+    socket.set_timeout(Some(Duration::from_secs(10)));
 
-        log::info!("Read {} bytes: {:?}", sz, &rx_buf[..sz]);
+    let r = socket.connect(remote_endpoint).await;
+    if let Err(e) = r {
+        warn!("connect error: {:?}", e);
+        return;
+    }
+    log::info!("TCP connected!");
 
+    let mut read_record_buffer = [0; 16384];
+    let mut write_record_buffer = [0; 16384];
+    let config = TlsConfig::new();
+    let mut tls = TlsConnection::new(socket, &mut read_record_buffer, &mut write_record_buffer);
+
+    tls.open(TlsContext::new(
+        &config,
+        UnsecureProvider::new::<Aes128GcmSha256>(ChaCha8Rng::seed_from_u64(seed)),
+    ))
+    .await
+    .expect("error establishing TLS connection");
+
+    tls.write_all(REQ_HEADERS)
+        .await
+        .expect("error writing data");
+    tls.flush().await.expect("error flushing data");
+
+    let mut rx_buf = [0; 16384];
+    let sz = tls.read(&mut rx_buf[..]).await.expect("error reading data");
+
+    log::info!("Read {} bytes: {:?}", sz, &rx_buf[..sz]);
+}
+
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    info!(
+        "project: {}, version: {}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
+    );
+
+    let (pwr, spi, mut rng) = initialize_peripherals();
+    let stack = initialize_network_stack(spawner, pwr, spi, &mut rng).await;
+    wait_for_network(stack).await;
+
+    loop {
+        read_data_from_rest_api(stack, rng.next_u64()).await;
         Timer::after(Duration::from_secs(5)).await;
     }
 }
