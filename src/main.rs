@@ -162,7 +162,7 @@ async fn read_data_from_rest_api(
     let mut rx_buffer = [0; 8192];
     let mut tx_buffer = [0; 8192];
 
-    info!("resolving {}", &HOST);
+    info!("resolving {}", HOST);
     let remote_addr = dns_client
         .get_host_by_name(HOST, AddrType::IPv4)
         .await
@@ -172,7 +172,7 @@ async fn read_data_from_rest_api(
         IpAddr::V4(addr) => IpEndpoint::new(IpAddress::Ipv4(Ipv4Address(addr.octets())), 443),
         _ => defmt::unreachable!("IPv6 not supported"),
     };
-    info!("connecting to {}", &HOST);
+    info!("connecting to {}", remote_endpoint);
 
     let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
     socket.set_timeout(Some(Duration::from_secs(10)));
@@ -184,8 +184,8 @@ async fn read_data_from_rest_api(
     }
     log::info!("TCP connected!");
 
-    let mut read_record_buffer = [0; 16384];
-    let mut write_record_buffer = [0; 16384];
+    let mut read_record_buffer = [0; 16640];
+    let mut write_record_buffer = [0; 16640];
     let config = TlsConfig::new();
     let mut tls = TlsConnection::new(socket, &mut read_record_buffer, &mut write_record_buffer);
 
@@ -204,7 +204,7 @@ async fn read_data_from_rest_api(
     let mut rx_buf = [0; 16384];
     let sz = tls.read(&mut rx_buf[..]).await.expect("error reading data");
 
-    log::info!("Read {} bytes: {:?}", sz, &rx_buf[..sz]);
+    info!("Read {} bytes", sz);
 }
 
 #[embassy_executor::main]
