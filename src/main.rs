@@ -30,6 +30,7 @@ bind_interrupts!(struct Irqs {
 
 const WIFI_NETWORK: &str = env!("WIFI_NETWORK");
 const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
+const DEFAULT_SLEEP_TIME_SEC: u64 = 60;
 const HOST: &str = env!("HOST");
 const REQ_HEADERS: &[u8] = b"GET /repos/kromych/pico-github-stars HTTP/1.1\r\n\
 Host: api.github.com\r\n\
@@ -220,6 +221,11 @@ async fn main(spawner: Spawner) {
 
     loop {
         read_data_from_rest_api(stack, rng.next_u64()).await;
-        Timer::after(Duration::from_secs(5)).await;
+        Timer::after(Duration::from_secs(
+            env!("SLEEP_TIME_SEC")
+                .parse()
+                .unwrap_or(DEFAULT_SLEEP_TIME_SEC),
+        ))
+        .await;
     }
 }
