@@ -16,7 +16,7 @@ user_or_org = "kromych"
 repo = "pico-github-stars"
 hostname = "api.github.com"
 port = 443
-body = (f"GET /repos/{user_or_org}/{repo} HTTP/1.1\r\n" +
+req_headers = (f"GET /repos/{user_or_org}/{repo} HTTP/1.1\r\n" +
        "Host: api.github.com\r\n" +
        "User-Agent: kromych/pico-github-stars\r\n" +
        "Accept: application/vnd.github+json\r\n" +
@@ -38,7 +38,7 @@ ssock = ssl.wrap_socket(sock)
 
 print(ssock.cipher())
 
-ssock.write(body.encode())
+ssock.write(req_headers.encode())
 
 response = b""
 while True:
@@ -91,7 +91,7 @@ user_or_org = "kromych"
 repo = "pico-github-stars"
 hostname = "api.github.com"
 port = 443
-body = (f"GET /repos/{user_or_org}/{repo} HTTP/1.1\r\n" +
+req_headers = (f"GET /repos/{user_or_org}/{repo} HTTP/1.1\r\n" +
        "Host: api.github.com\r\n" +
        "User-Agent: kromych/pico-github-stars\r\n" +
        "Accept: application/vnd.github+json\r\n" +
@@ -104,7 +104,7 @@ context = ssl.create_default_context()
 with socket.create_connection((hostname, port)) as sock:
     with context.wrap_socket(sock, server_hostname=hostname) as ssock:
         print(ssock.version(), ssock.cipher())
-        ssock.send(body.encode())
+        ssock.send(req_headers.encode())
         while True:
             data = ssock.read(2048)
             if len(data) < 1:
