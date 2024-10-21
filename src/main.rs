@@ -175,10 +175,14 @@ async fn read_data_from_rest_api(
     let mut tx_buffer = [0; 8192];
 
     debug!("resolving {}", HOST);
-    let remote_addr = dns_client
-        .get_host_by_name(HOST, AddrType::IPv4)
-        .await
-        .unwrap();
+    let remote_addr = dns_client.get_host_by_name(HOST, AddrType::IPv4).await;
+    let remote_addr = match remote_addr {
+        Ok(addr) => addr,
+        Err(e) => {
+            error!("DNS error: {:?}", e);
+            return;
+        }
+    };
 
     let remote_endpoint = match remote_addr {
         IpAddr::V4(addr) => IpEndpoint::new(IpAddress::Ipv4(Ipv4Address(addr.octets())), 443),
@@ -201,17 +205,25 @@ async fn read_data_from_rest_api(
     let config = TlsConfig::new();
     let mut tls = TlsConnection::new(socket, &mut read_record_buffer, &mut write_record_buffer);
 
-    tls.open(TlsContext::new(
+    if let Err(e) = tls
+        .open(TlsContext::new(
         &config,
         UnsecureProvider::new::<Aes128GcmSha256>(ChaCha8Rng::seed_from_u64(seed)),
     ))
     .await
-    .expect("error establishing TLS connection");
+    {
+        error!("TLS error: {:?}", e);
+        return;
+    }
 
-    tls.write_all(REQ_HEADERS)
-        .await
-        .expect("error writing data");
-    tls.flush().await.expect("error flushing data");
+    if let Err(e) = tls.write_all(REQ_HEADERS).await {
+        error!("write error: {:?}", e);
+        return;
+    }
+    if let Err(e) = tls.flush().await {
+        error!("flush error: {:?}", e);
+        return;
+    }
 
     let mut rx_buf = [0; 16384];
     let sz = {
