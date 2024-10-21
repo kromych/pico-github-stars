@@ -76,7 +76,7 @@ async fn call_rest_api(stack: &'static embassy_net::Stack<cyw43::NetDriver<'stat
         warn!("connect error: {:?}", e);
         return;
     }
-    log::debug!("TCP connected!");
+    debug!("TCP connected!");
 
     let mut read_record_buffer = [0; 16640];
     let mut write_record_buffer = [0; 16640];
