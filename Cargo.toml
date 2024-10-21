@@ -46,7 +46,7 @@ embedded-hal-async = "1.0"
 embedded-hal-bus = { version = "0.2", features = ["async"] }
 embedded-io-async = { version = "0.6", features = ["defmt-03"] }
 embedded-nal-async = { version = "0.7"}
-embedded-tls = { git = "https://github.com/drogue-iot/embedded-tls", features = ["defmt"], default-features = false}
+embedded-tls = { git = "https://github.com/drogue-iot/embedded-tls", revision = "7936bc11c123260065b5b9776b584308ad2e8f8a", features = ["defmt"], default-features = false}
 
 [profile.release]
 debug = 2
