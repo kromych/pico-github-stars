@@ -5,18 +5,16 @@
 
 #![no_std]
 #![no_main]
-#![allow(async_fn_in_trait)]
 
-use cyw43_pio::PioSpi;
 use defmt::*;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_net::Config;
-use embassy_rp::bind_interrupts;
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIO0};
 use embassy_rp::pio::{InterruptHandler, Pio};
+use embassy_rp::{bind_interrupts, Peripheral};
 use embassy_time::{Duration, Timer};
 use panic_probe as _;
 use rand::RngCore;
@@ -34,7 +32,7 @@ const DEFAULT_SLEEP_TIME_SEC: u64 = 60;
 
 #[embassy_executor::task]
 async fn cyw43_task(
-    runner: cyw43::Runner<'static, Output<'static>, PioSpi<'static, PIO0, 0, DMA_CH0>>,
+    runner: cyw43::Runner<'static, Output<'static>, cyw43_pio::PioSpi<'static, PIO0, 0, DMA_CH0>>,
 ) -> ! {
     runner.run().await
 }
@@ -49,28 +47,82 @@ static STATE: StaticCell<cyw43::State> = StaticCell::new();
 static RESOURCES: StaticCell<embassy_net::StackResources<32>> = StaticCell::new();
 static STACK: StaticCell<embassy_net::Stack<cyw43::NetDriver>> = StaticCell::new();
 
-fn initialize_peripherals() -> (Output<'static>, PioSpi<'static, PIO0, 0, DMA_CH0>, RoscRng) {
-    let p = embassy_rp::init(Default::default());
-    let pwr = Output::new(p.PIN_23, Level::Low);
-    let cs = Output::new(p.PIN_25, Level::High);
-    let mut pio = Pio::new(p.PIO0, Irqs);
-    let spi = PioSpi::new(
+fn initialize_peripherals() -> (
+    Output<'static>,
+    cyw43_pio::PioSpi<'static, PIO0, 0, DMA_CH0>,
+    RoscRng,
+) {
+    let peripherals = embassy_rp::init(Default::default());
+    let pwr = Output::new(peripherals.PIN_23, Level::Low);
+    let wifi_cs = Output::new(peripherals.PIN_25, Level::High);
+    let mut pio = Pio::new(peripherals.PIO0, Irqs);
+    let wifi_spi = cyw43_pio::PioSpi::new(
         &mut pio.common,
         pio.sm0,
         pio.irq0,
-        cs,
-        p.PIN_24,
-        p.PIN_29,
-        p.DMA_CH0,
+        wifi_cs,
+        peripherals.PIN_24,
+        peripherals.PIN_29,
+        peripherals.DMA_CH0,
     );
+
+    let miso = unsafe { peripherals.PIN_16.clone_unchecked() };
+    let rst = embassy_rp::gpio::Output::new(peripherals.PIN_15, embassy_rp::gpio::Level::Low);
+
+    let dc = embassy_rp::gpio::Output::new(peripherals.PIN_16, embassy_rp::gpio::Level::Low);
+    let display_cs =
+        embassy_rp::gpio::Output::new(peripherals.PIN_17, embassy_rp::gpio::Level::High);
+    let clk = peripherals.PIN_18;
+    let mosi = peripherals.PIN_19;
+
+    let mut display_config = embassy_rp::spi::Config::default();
+    display_config.frequency = 64_000_000;
+    display_config.phase = embassy_rp::spi::Phase::CaptureOnSecondTransition;
+    display_config.polarity = embassy_rp::spi::Polarity::IdleHigh;
+
+    let spi: embassy_rp::spi::Spi<'_, _, embassy_rp::spi::Blocking> =
+        embassy_rp::spi::Spi::new_blocking(
+            peripherals.SPI0,
+            clk,
+            mosi,
+            miso,
+            display_config.clone(),
+        );
+    let spi_bus: embassy_sync::blocking_mutex::Mutex<
+        embassy_sync::blocking_mutex::raw::NoopRawMutex,
+        _,
+    > = embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(spi));
+
+    let display_spi = embassy_embedded_hal::shared_bus::blocking::spi::SpiDeviceWithConfig::new(
+        &spi_bus,
+        display_cs,
+        display_config,
+    );
+
+    let di = display_interface_spi::SPIInterface::new(display_spi, dc);
+    let mut display = mipidsi::Builder::new(mipidsi::models::ST7789, di)
+        .orientation(mipidsi::options::Orientation::new().flip_horizontal())
+        .display_size(240, 320)
+        .invert_colors(mipidsi::options::ColorInversion::Normal)
+        .reset_pin(rst)
+        .init(&mut embassy_time::Delay)
+        .unwrap();
+    // Backlight pin
+    let _ = embassy_rp::gpio::Output::new(peripherals.PIN_20, embassy_rp::gpio::Level::High);
+
+    use embedded_graphics::draw_target::DrawTarget;
+    display
+        .clear(embedded_graphics::pixelcolor::RgbColor::GREEN)
+        .unwrap();
+
     let rng = RoscRng;
-    (pwr, spi, rng)
+    (pwr, wifi_spi, rng)
 }
 
 async fn initialize_network_stack(
     spawner: Spawner,
     pwr: Output<'static>,
-    spi: PioSpi<'static, PIO0, 0, DMA_CH0>,
+    spi: cyw43_pio::PioSpi<'static, PIO0, 0, DMA_CH0>,
     rng: &mut RoscRng,
 ) -> &'static embassy_net::Stack<cyw43::NetDriver<'static>> {
     let fw = include_bytes!("../cyw43-firmware/43439A0.bin");

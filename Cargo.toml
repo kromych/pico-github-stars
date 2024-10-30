@@ -33,20 +33,17 @@ display-interface = "0.5"
 display-interface-spi = "0.5"
 heapless = "0.8"
 log = "0.4"
+mipidsi = "0.8"
 panic-probe = { version = "0.3", features = ["print-defmt"] }
 portable-atomic = { version = "1.9", features = ["critical-section"] }
 rand = { version = "0.8",  default-features = false }
 rand_chacha = { version = "0.3.1", default-features = false }
-st7789 = "0.7"
 static_cell = "2.1"
 
 embedded-graphics = "0.8"
-embedded-hal-1 = { package = "embedded-hal", version = "1.0" }
-embedded-hal-async = "1.0"
-embedded-hal-bus = { version = "0.2", features = ["async"] }
 embedded-io-async = { version = "0.6", features = ["defmt-03"] }
 embedded-nal-async = { version = "0.7"}
-embedded-tls = { git = "https://github.com/drogue-iot/embedded-tls", revision = "7936bc11c123260065b5b9776b584308ad2e8f8a", features = ["defmt"], default-features = false}
+embedded-tls = { git = "https://github.com/drogue-iot/embedded-tls", rev = "7936bc11c123260065b5b9776b584308ad2e8f8a", features = ["defmt"], default-features = false}
 
 [profile.release]
 debug = 2
