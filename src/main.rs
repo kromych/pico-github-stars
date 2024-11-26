@@ -10,16 +10,18 @@ use defmt::*;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_net::Config;
+use embassy_rp::bind_interrupts;
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIO0};
 use embassy_rp::pio::{InterruptHandler, Pio};
-use embassy_rp::{bind_interrupts, Peripheral};
 use embassy_time::{Duration, Timer};
 use panic_probe as _;
 use rand::RngCore;
 use static_cell::StaticCell;
 
+mod float;
+mod pico_display;
 mod process_data;
 
 bind_interrupts!(struct Irqs {
@@ -66,57 +68,64 @@ fn initialize_peripherals() -> (
         peripherals.DMA_CH0,
     );
 
-    let miso = unsafe { peripherals.PIN_16.clone_unchecked() };
-    let rst = embassy_rp::gpio::Output::new(peripherals.PIN_15, embassy_rp::gpio::Level::Low);
-
+    let mosi = peripherals.PIN_19;
     let dc = embassy_rp::gpio::Output::new(peripherals.PIN_16, embassy_rp::gpio::Level::Low);
+    let clk = peripherals.PIN_18;
     let display_cs =
         embassy_rp::gpio::Output::new(peripherals.PIN_17, embassy_rp::gpio::Level::High);
-    let clk = peripherals.PIN_18;
-    let mosi = peripherals.PIN_19;
-
-    let mut display_config = embassy_rp::spi::Config::default();
-    display_config.frequency = 64_000_000;
-    display_config.phase = embassy_rp::spi::Phase::CaptureOnSecondTransition;
-    display_config.polarity = embassy_rp::spi::Polarity::IdleHigh;
-
-    let spi: embassy_rp::spi::Spi<'_, _, embassy_rp::spi::Blocking> =
-        embassy_rp::spi::Spi::new_blocking(
-            peripherals.SPI0,
-            clk,
-            mosi,
-            miso,
-            display_config.clone(),
-        );
-    let spi_bus: embassy_sync::blocking_mutex::Mutex<
-        embassy_sync::blocking_mutex::raw::NoopRawMutex,
-        _,
-    > = embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(spi));
-
-    let display_spi = embassy_embedded_hal::shared_bus::blocking::spi::SpiDeviceWithConfig::new(
-        &spi_bus,
-        display_cs,
-        display_config,
+    let bl_pwm = embassy_rp::pwm::Pwm::new_output_a(
+        peripherals.PWM_SLICE2,
+        peripherals.PIN_20,
+        embassy_rp::pwm::Config::default(),
     );
-
-    let di = display_interface_spi::SPIInterface::new(display_spi, dc);
-    let mut display = mipidsi::Builder::new(mipidsi::models::ST7789, di)
-        .orientation(mipidsi::options::Orientation::new().flip_horizontal())
-        .display_size(240, 320)
-        .invert_colors(mipidsi::options::ColorInversion::Normal)
-        .reset_pin(rst)
-        .init(&mut embassy_time::Delay)
-        .unwrap();
-    // Backlight pin
-    let _ = embassy_rp::gpio::Output::new(peripherals.PIN_20, embassy_rp::gpio::Level::High);
-
-    use embedded_graphics::draw_target::DrawTarget;
-    display
-        .clear(embedded_graphics::pixelcolor::RgbColor::GREEN)
-        .unwrap();
+    pico_display::PicoDisplay::new(
+        pico_display::DisplayKind::PicoDisplay2_0,
+        pico_display::DisplayRotation::Rotate0,
+        peripherals.SPI0,
+        clk,
+        mosi,
+        display_cs,
+        dc,
+        bl_pwm,
+    );
 
     let rng = RoscRng;
     (pwr, wifi_spi, rng)
+}
+
+fn initialize_peripherals_no_net() {
+    let peripherals = embassy_rp::init(Default::default());
+
+    let mosi = peripherals.PIN_19;
+    let dc = embassy_rp::gpio::Output::new(peripherals.PIN_16, embassy_rp::gpio::Level::High);
+    let clk = peripherals.PIN_18;
+    let display_cs =
+        embassy_rp::gpio::Output::new(peripherals.PIN_17, embassy_rp::gpio::Level::High);
+    let mut pwm_config = embassy_rp::pwm::Config::default();
+    pwm_config.enable = true;
+    pwm_config.compare_a = 65535;
+    pwm_config.compare_b = 65535;
+    pwm_config.top = 65535;
+
+    let bl_pwm =
+        embassy_rp::pwm::Pwm::new_output_a(peripherals.PWM_SLICE2, peripherals.PIN_20, pwm_config);
+
+    let mut display = pico_display::PicoDisplay::new(
+        pico_display::DisplayKind::PicoDisplay2_0,
+        pico_display::DisplayRotation::Rotate0,
+        peripherals.SPI0,
+        clk,
+        mosi,
+        display_cs,
+        dc,
+        bl_pwm,
+    );
+    display.clear(pico_display::RGB565::green());
+    loop {
+        let sleep_sec = 1;
+        info!("Sleeping for {} seconds", sleep_sec);
+        pico_display::delay_ms(1000);
+    }
 }
 
 async fn initialize_network_stack(
@@ -186,14 +195,7 @@ async fn wait_for_network(stack: &'static embassy_net::Stack<cyw43::NetDriver<'s
     info!("Stack is up!");
 }
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
-    info!(
-        "project: {}, version: {}",
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION")
-    );
-
+async fn run(spawner: Spawner) {
     let (pwr, spi, mut rng) = initialize_peripherals();
     let stack = initialize_network_stack(spawner, pwr, spi, &mut rng).await;
     wait_for_network(stack).await;
@@ -207,6 +209,22 @@ async fn main(spawner: Spawner) {
 
         // Randomize sleep time to hopefully make it easier for the server.
         let sleep_sec = sleep_sec + (rng.next_u32() % (DEFAULT_SLEEP_TIME_SEC as u32)) as u64;
+        info!("Sleeping for {} seconds", sleep_sec);
+        Timer::after(Duration::from_secs(sleep_sec)).await;
+    }
+}
+
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    info!(
+        "project: {}, version: {}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
+    );
+
+    initialize_peripherals_no_net();
+    loop {
+        let sleep_sec = 1;
         info!("Sleeping for {} seconds", sleep_sec);
         Timer::after(Duration::from_secs(sleep_sec)).await;
     }
