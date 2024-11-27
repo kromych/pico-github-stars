@@ -68,33 +68,44 @@ pub struct PicoDisplay<T: spi::Instance + 'static> {
 #[repr(u8)]
 /// ST7789 commands
 enum Command {
+    NOP = 0x00,
     SWRESET = 0x01,
+    RDDID = 0x04,
+    RDDST = 0x09,
+    SLPIN = 0x10,
+    SLPOUT = 0x11,
+    PTLON = 0x12,
+    NORON = 0x13,
+    INVOFF = 0x20,
+    INVON = 0x21,
+    GAMSET = 0x26,
+    DISPOFF = 0x28,
+    DISPON = 0x29,
+    CASET = 0x2A,
+    RASET = 0x2B,
+    RAMWR = 0x2C,
+    RAMRD = 0x2E,
+    PTLAR = 0x30,
+    VSCRDER = 0x33,
     TEOFF = 0x34,
     TEON = 0x35,
     MADCTL = 0x36,
+    VSCAD = 0x37,
     COLMOD = 0x3A,
+    PORCTRL = 0xB2,
     GCTRL = 0xB7,
     VCOMS = 0xBB,
     LCMCTRL = 0xC0,
     VDVVRHEN = 0xC2,
     VRHS = 0xC3,
     VDVS = 0xC4,
+    VCMOFSET = 0xC5,
     FRCTRL2 = 0xC6,
+    PWMFRSEL = 0xCC,
     PWCTRL1 = 0xD0,
     _D6 = 0xD6,
-    PORCTRL = 0xB2,
     GMCTRP1 = 0xE0,
     GMCTRN1 = 0xE1,
-    INVOFF = 0x20,
-    SLPOUT = 0x11,
-    DISPON = 0x29,
-    GAMSET = 0x26,
-    DISPOFF = 0x28,
-    RAMWR = 0x2C,
-    INVON = 0x21,
-    CASET = 0x2A,
-    RASET = 0x2B,
-    PWMFRSEL = 0xCC,
 }
 
 const MADCTL_ROW_ORDER: u8 = 0b10000000;
@@ -156,7 +167,9 @@ impl<T: spi::Instance> PicoDisplay<T> {
         pwm: Pwm<'static>,
     ) -> Self {
         let mut spi_config = spi::Config::default();
-        spi_config.frequency = 61_500_000;
+        // The ST7789 requires 16 ns between SPI rising edges.
+        // 16 ns = 62,500,000 Hz
+        spi_config.frequency = 62_500_000;
         spi_config.polarity = spi::Polarity::IdleHigh;
         spi_config.phase = spi::Phase::CaptureOnSecondTransition;
         let spi: Spi<'static, T, Blocking> = Spi::new_blocking_txonly(spi, clk, mosi, spi_config);
@@ -179,23 +192,32 @@ impl<T: spi::Instance> PicoDisplay<T> {
         delay_ms(100);
         display.configure_display();
         delay_ms(50); // Wait for the update to apply
-        display.set_backlight(255); // Turn backlight on now surprises have passed
+        display.set_backlight(175); // Turn backlight on now surprises have passed
 
         display
     }
 
     fn command(&mut self, command: Command, data: &[u8]) {
-        //defmt::info!("Sending command: {:#x}", command as u8);
-        self.cs.set_low();
-
         self.dc.set_low();
+
+        self.cs.set_low();
         self.spi.blocking_write(&[command as u8]).unwrap();
+        self.cs.set_high();
+
         if !data.is_empty() {
             self.dc.set_high();
+            self.cs.set_low();
             self.spi.blocking_write(data).unwrap();
-        }
+            self.cs.set_high();
 
-        self.cs.set_high();
+            if data.len() < 16 {
+                defmt::info!("Command 0x{:x}, data: 0x{:x}", command as u8, data);
+            } else {
+                defmt::info!("Command 0x{:x}, {} data bytes", command as u8, data.len());
+            }
+        } else {
+            defmt::info!("Command {:x}", command as u8);
+        }
     }
 
     fn configure_display(&mut self) {
@@ -325,17 +347,24 @@ impl<T: spi::Instance> PicoDisplay<T> {
             };
         }
 
-        // Convert u16 arrays to big-endian byte arrays
-        let mut caset_bytes = [0u8; 4];
-        caset_bytes[0..2].copy_from_slice(&caset[0].to_be_bytes());
-        caset_bytes[2..4].copy_from_slice(&caset[1].to_be_bytes());
-
-        let mut raset_bytes = [0u8; 4];
-        raset_bytes[0..2].copy_from_slice(&raset[0].to_be_bytes());
-        raset_bytes[2..4].copy_from_slice(&raset[1].to_be_bytes());
-
-        self.command(Command::CASET, &caset_bytes);
-        self.command(Command::RASET, &raset_bytes);
+        self.command(
+            Command::CASET,
+            &[
+                (caset[0] >> 8) as u8,
+                caset[0] as u8,
+                (caset[1] >> 8) as u8,
+                caset[1] as u8,
+            ],
+        );
+        self.command(
+            Command::RASET,
+            &[
+                (raset[0] >> 8) as u8,
+                raset[0] as u8,
+                (raset[1] >> 8) as u8,
+                raset[1] as u8,
+            ],
+        );
         self.command(Command::MADCTL, &[madctl]);
     }
 
@@ -421,13 +450,16 @@ impl<T: spi::Instance> PicoDisplay<T> {
         self.command(Command::DISPON, &[]); // turn display on
     }
 
-    pub fn set_backlight(&mut self, _value: u8) {
-        // let gamma = 2.8;
-        // let value = (value as f32) / 255.0f32;
-        // let value = float::powf32(value, gamma);
-        // let value = (value * 65535.0f32 + 0.5f32) as u16;
+    pub fn set_backlight(&mut self, value: u8) {
+        let gamma = 2.8;
+        let value = (value as f32) / 255.0f32;
+        let value = float::powf32(value, gamma);
+        let value = (value * 65535.0f32 + 0.5f32) as u16;
+        defmt::info!("Setting backlight to {}", value);
 
-        // self.pwm.set_counter(65535);
+        let mut pwm_config = embassy_rp::pwm::Config::default();
+        pwm_config.compare_a = value;
+        self.pwm.set_config(&pwm_config);
     }
 
     fn write_frame(&mut self, frame: &[RGB565]) {
