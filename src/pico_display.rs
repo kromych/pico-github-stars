@@ -170,8 +170,6 @@ impl<T: spi::Instance> PicoDisplay<T> {
         // The ST7789 requires 16 ns between SPI rising edges.
         // 16 ns = 62,500,000 Hz
         spi_config.frequency = 62_500_000;
-        spi_config.polarity = spi::Polarity::IdleHigh;
-        spi_config.phase = spi::Phase::CaptureOnSecondTransition;
         let spi: Spi<'static, T, Blocking> = Spi::new_blocking_txonly(spi, clk, mosi, spi_config);
 
         // Assuming 16-bit color depth (RGB565)

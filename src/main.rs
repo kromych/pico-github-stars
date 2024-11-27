@@ -97,18 +97,16 @@ fn initialize_peripherals_no_net() {
     let peripherals = embassy_rp::init(Default::default());
 
     let mosi = peripherals.PIN_19;
-    let dc = embassy_rp::gpio::Output::new(peripherals.PIN_16, embassy_rp::gpio::Level::High);
+    let dc = embassy_rp::gpio::Output::new(peripherals.PIN_16, embassy_rp::gpio::Level::Low);
     let clk = peripherals.PIN_18;
     let display_cs =
-        embassy_rp::gpio::Output::new(peripherals.PIN_17, embassy_rp::gpio::Level::High);
-    let mut pwm_config = embassy_rp::pwm::Config::default();
-    pwm_config.enable = true;
-    pwm_config.compare_a = 65535;
-    pwm_config.compare_b = 65535;
-    pwm_config.top = 65535;
+        embassy_rp::gpio::Output::new(peripherals.PIN_17, embassy_rp::gpio::Level::Low);
 
-    let bl_pwm =
-        embassy_rp::pwm::Pwm::new_output_a(peripherals.PWM_SLICE2, peripherals.PIN_20, pwm_config);
+    let bl_pwm = embassy_rp::pwm::Pwm::new_output_a(
+        peripherals.PWM_SLICE2,
+        peripherals.PIN_20,
+        embassy_rp::pwm::Config::default(),
+    );
 
     let mut display = pico_display::PicoDisplay::new(
         pico_display::DisplayKind::PicoDisplay2_0,
@@ -120,7 +118,7 @@ fn initialize_peripherals_no_net() {
         dc,
         bl_pwm,
     );
-    display.clear(pico_display::RGB565::green());
+    display.clear(pico_display::RGB565::white());
     loop {
         let sleep_sec = 1;
         info!("Sleeping for {} seconds", sleep_sec);
