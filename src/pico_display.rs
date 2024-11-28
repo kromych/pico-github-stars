@@ -21,6 +21,7 @@ use embassy_rp::pwm::Pwm;
 use embassy_rp::spi;
 use embassy_rp::spi::Spi;
 use embassy_rp::Peripheral;
+use serde::de;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -204,7 +205,7 @@ impl<T: spi::Instance> PicoDisplay<T> {
         self.dc.set_low();
 
         self.cs.set_low();
-        self.spi.write(&[command as u8]).await.ok(); // TODO: Handle error
+        self.spi.write(&[command as u8]).await.unwrap(); // TODO: Handle error
         self.cs.set_high();
 
         // defmt::info!("Command 0x{:x}", command as u8);
@@ -215,7 +216,7 @@ impl<T: spi::Instance> PicoDisplay<T> {
         self.dc.set_high();
 
         self.cs.set_low();
-        self.spi.write(data).await.ok(); // TODO: Handle error
+        self.spi.write(data).await.unwrap(); // TODO: Handle error
         self.cs.set_high();
 
         // defmt::info!("Command 0x{:x}", command as u8);
@@ -231,6 +232,102 @@ impl<T: spi::Instance> PicoDisplay<T> {
         // } else {
         //     defmt::info!("Command 0x{:x}, {} data bytes", command as u8, data.len());
         // }
+    }
+
+    async fn init_display(&mut self) {
+        self.write_command(Command::SWRESET).await; // software reset
+
+        delay_ms(150);
+
+        self.write_command(Command::TEON).await; // enable frame sync signal if used
+        self.write_command_with_data(Command::COLMOD, &[0x05]).await; // 16 bits per pixel, RGB565
+
+        self.write_command_with_data(Command::PORCTRL, &[0x0c, 0x0c, 0x00, 0x33, 0x33])
+            .await;
+        self.write_command_with_data(Command::LCMCTRL, &[0x2c])
+            .await;
+        self.write_command_with_data(Command::VDVVRHEN, &[0x01])
+            .await;
+        self.write_command_with_data(Command::VRHS, &[0x12]).await;
+        self.write_command_with_data(Command::VDVS, &[0x20]).await;
+        self.write_command_with_data(Command::PWCTRL1, &[0xa4, 0xa1])
+            .await;
+        self.write_command_with_data(Command::FRCTRL2, &[0x0f])
+            .await;
+
+        match self.kind {
+            DisplayKind::PicoDisplaySquare => {
+                defmt::info!("Pico Display Square");
+                self.write_command_with_data(Command::GCTRL, &[0x14]).await;
+                self.write_command_with_data(Command::VCOMS, &[0x37]).await;
+                self.write_command_with_data(
+                    Command::GMCTRP1,
+                    &[
+                        0xD0, 0x04, 0x0D, 0x11, 0x13, 0x2B, 0x3F, 0x54, 0x4C, 0x18, 0x0D, 0x0B,
+                        0x1F, 0x23,
+                    ],
+                )
+                .await;
+                self.write_command_with_data(
+                    Command::GMCTRN1,
+                    &[
+                        0xD0, 0x04, 0x0C, 0x11, 0x13, 0x2C, 0x3F, 0x44, 0x51, 0x2F, 0x1F, 0x1F,
+                        0x20, 0x23,
+                    ],
+                )
+                .await;
+            }
+
+            DisplayKind::PicoDisplay2_0 | DisplayKind::PicoDisplay2_8 => {
+                defmt::info!("Pico Display 2.0 or 2.8");
+                self.write_command_with_data(Command::GCTRL, &[0x35]).await;
+                self.write_command_with_data(Command::VCOMS, &[0x1f]).await;
+                self.write_command_with_data(
+                    Command::GMCTRP1,
+                    &[
+                        0xD0, 0x08, 0x11, 0x08, 0x0C, 0x15, 0x39, 0x33, 0x50, 0x36, 0x13, 0x14,
+                        0x29, 0x2D,
+                    ],
+                )
+                .await;
+                self.write_command_with_data(
+                    Command::GMCTRN1,
+                    &[
+                        0xD0, 0x08, 0x10, 0x08, 0x06, 0x06, 0x39, 0x44, 0x51, 0x0B, 0x16, 0x14,
+                        0x2F, 0x31,
+                    ],
+                )
+                .await;
+            }
+
+            DisplayKind::PicoDisplay1_14 => {
+                defmt::info!("Pico Display 1.14");
+                self.write_command_with_data(Command::VRHS, &[0x00]).await; // VRH Voltage setting
+                self.write_command_with_data(Command::GCTRL, &[0x75]).await; // VGH and VGL voltages
+                self.write_command_with_data(Command::VCOMS, &[0x3D]).await; // VCOM voltage
+                self.write_command_with_data(Command::_D6, &[0xa1]).await; // ???
+                self.write_command_with_data(
+                    Command::GMCTRP1,
+                    &[
+                        0x70, 0x04, 0x08, 0x09, 0x09, 0x05, 0x2A, 0x33, 0x41, 0x07, 0x13, 0x13,
+                        0x29, 0x2f,
+                    ],
+                )
+                .await;
+                self.write_command_with_data(
+                    Command::GMCTRN1,
+                    &[
+                        0x70, 0x03, 0x09, 0x0A, 0x09, 0x06, 0x2B, 0x34, 0x41, 0x07, 0x12, 0x14,
+                        0x28, 0x2E,
+                    ],
+                )
+                .await;
+            }
+        }
+
+        self.write_command(Command::INVON).await; // set inversion mode
+        self.write_command(Command::SLPOUT).await; // leave sleep mode
+        self.write_command(Command::DISPON).await; // turn display on
     }
 
     async fn configure_display(&mut self) {
@@ -249,6 +346,7 @@ impl<T: spi::Instance> PicoDisplay<T> {
 
         // 240x240 Square and Round LCD Breakouts
         if width == 240 && height == 240 {
+            defmt::info!("240x240 Square and Round LCD Breakouts");
             let mut row_offset = if round { 40 } else { 80 };
             let col_offset = 0;
 
@@ -296,6 +394,7 @@ impl<T: spi::Instance> PicoDisplay<T> {
         }
         // Pico Display
         else if width == 240 && height == 135 {
+            defmt::info!("Pico Display");
             caset[0] = 40; // 240 columns
             caset[1] = 40 + width - 1;
             raset[0] = 52; // 135 rows
@@ -315,6 +414,7 @@ impl<T: spi::Instance> PicoDisplay<T> {
         }
         // Pico Display at 90 degree rotation
         else if width == 135 && height == 240 {
+            defmt::info!("Pico Display at 90 degree rotation");
             caset[0] = 52; // 135 columns
             caset[1] = 52 + width - 1;
             raset[0] = 40; // 240 rows
@@ -328,8 +428,9 @@ impl<T: spi::Instance> PicoDisplay<T> {
                 0
             };
         }
-        // Pico Display 2.0
+        // Pico Display 2.0 and 2.8
         else if width == 320 && height == 240 {
+            defmt::info!("Pico Display 2.0 and 2.8");
             caset[0] = 0;
             caset[1] = 319;
             raset[0] = 0;
@@ -346,6 +447,7 @@ impl<T: spi::Instance> PicoDisplay<T> {
         }
         // Pico Display 2.0 at 90 degree rotation
         else if width == 240 && height == 320 {
+            defmt::info!("Pico Display 2.0 at 90 degree rotation");
             caset[0] = 0;
             caset[1] = 239;
             raset[0] = 0;
@@ -384,99 +486,6 @@ impl<T: spi::Instance> PicoDisplay<T> {
             .await;
     }
 
-    async fn init_display(&mut self) {
-        self.write_command(Command::SWRESET).await; // software reset
-
-        delay_ms(150);
-
-        self.write_command(Command::TEON).await; // enable frame sync signal if used
-        self.write_command_with_data(Command::COLMOD, &[0x05]).await; // 16 bits per pixel, RGB565
-
-        self.write_command_with_data(Command::PORCTRL, &[0x0c, 0x0c, 0x00, 0x33, 0x33])
-            .await;
-        self.write_command_with_data(Command::LCMCTRL, &[0x2c])
-            .await;
-        self.write_command_with_data(Command::VDVVRHEN, &[0x01])
-            .await;
-        self.write_command_with_data(Command::VRHS, &[0x12]).await;
-        self.write_command_with_data(Command::VDVS, &[0x20]).await;
-        self.write_command_with_data(Command::PWCTRL1, &[0xa4, 0xa1])
-            .await;
-        self.write_command_with_data(Command::FRCTRL2, &[0x0f])
-            .await;
-
-        match self.kind {
-            DisplayKind::PicoDisplaySquare => {
-                self.write_command_with_data(Command::GCTRL, &[0x14]).await;
-                self.write_command_with_data(Command::VCOMS, &[0x37]).await;
-                self.write_command_with_data(
-                    Command::GMCTRP1,
-                    &[
-                        0xD0, 0x04, 0x0D, 0x11, 0x13, 0x2B, 0x3F, 0x54, 0x4C, 0x18, 0x0D, 0x0B,
-                        0x1F, 0x23,
-                    ],
-                )
-                .await;
-                self.write_command_with_data(
-                    Command::GMCTRN1,
-                    &[
-                        0xD0, 0x04, 0x0C, 0x11, 0x13, 0x2C, 0x3F, 0x44, 0x51, 0x2F, 0x1F, 0x1F,
-                        0x20, 0x23,
-                    ],
-                )
-                .await;
-            }
-
-            DisplayKind::PicoDisplay2_0 | DisplayKind::PicoDisplay2_8 => {
-                self.write_command_with_data(Command::GCTRL, &[0x35]).await;
-                self.write_command_with_data(Command::VCOMS, &[0x1f]).await;
-                self.write_command_with_data(
-                    Command::GMCTRP1,
-                    &[
-                        0xD0, 0x08, 0x11, 0x08, 0x0C, 0x15, 0x39, 0x33, 0x50, 0x36, 0x13, 0x14,
-                        0x29, 0x2D,
-                    ],
-                )
-                .await;
-                self.write_command_with_data(
-                    Command::GMCTRN1,
-                    &[
-                        0xD0, 0x08, 0x10, 0x08, 0x06, 0x06, 0x39, 0x44, 0x51, 0x0B, 0x16, 0x14,
-                        0x2F, 0x31,
-                    ],
-                )
-                .await;
-            }
-
-            DisplayKind::PicoDisplay1_14 => {
-                self.write_command_with_data(Command::VRHS, &[0x00]).await; // VRH Voltage setting
-                self.write_command_with_data(Command::GCTRL, &[0x75]).await; // VGH and VGL voltages
-                self.write_command_with_data(Command::VCOMS, &[0x3D]).await; // VCOM voltage
-                self.write_command_with_data(Command::_D6, &[0xa1]).await; // ???
-                self.write_command_with_data(
-                    Command::GMCTRP1,
-                    &[
-                        0x70, 0x04, 0x08, 0x09, 0x09, 0x05, 0x2A, 0x33, 0x41, 0x07, 0x13, 0x13,
-                        0x29, 0x2f,
-                    ],
-                )
-                .await;
-                self.write_command_with_data(
-                    Command::GMCTRN1,
-                    &[
-                        0x70, 0x03, 0x09, 0x0A, 0x09, 0x06, 0x2B, 0x34, 0x41, 0x07, 0x12, 0x14,
-                        0x28, 0x2E,
-                    ],
-                )
-                .await;
-            }
-        }
-
-        self.write_command(Command::INVON).await; // set inversion mode
-        self.write_command(Command::SLPOUT).await; // leave sleep mode
-        self.write_command(Command::DISPON).await; // turn display on
-    }
-
     pub fn set_backlight(&mut self, value: u8) {
         const GAMMA: f32 = 2.8;
         let pwm = (float::rom_instrinsics::powf32((value as f32) / 255.0f32, GAMMA) * 65535.0f32
@@ -493,19 +502,9 @@ impl<T: spi::Instance> PicoDisplay<T> {
     }
 
     pub async fn clear(&mut self, color: RGB565) {
-        // Represent as bytes and write to display
-        const CHUNK_NUM: usize = 16;
-        let mut chunk = [color; 320 * 240 / CHUNK_NUM];
-        //defmt::info!("Writing frame, size: {}", bytes.len());
-        let bytes = unsafe {
-            core::slice::from_raw_parts_mut(
-                chunk.as_mut_ptr() as *mut u8,
-                chunk.len() * core::mem::size_of::<RGB565>(),
-            )
-        };
-        for _ in 0..CHUNK_NUM {
-            self.write_command(Command::RAMWR).await;
-            self.spi.write(bytes).await.ok();
+        self.write_command(Command::RAMWR).await;
+        for _ in 0..self.frame_size - 1 {
+            self.spi.write(&color.into_bits().to_be_bytes()).await.ok();
         }
     }
 }
