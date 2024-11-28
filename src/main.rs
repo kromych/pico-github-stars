@@ -68,32 +68,11 @@ fn initialize_peripherals() -> (
         peripherals.DMA_CH0,
     );
 
-    let mosi = peripherals.PIN_19;
-    let dc = embassy_rp::gpio::Output::new(peripherals.PIN_16, embassy_rp::gpio::Level::Low);
-    let clk = peripherals.PIN_18;
-    let display_cs =
-        embassy_rp::gpio::Output::new(peripherals.PIN_17, embassy_rp::gpio::Level::High);
-    let bl_pwm = embassy_rp::pwm::Pwm::new_output_a(
-        peripherals.PWM_SLICE2,
-        peripherals.PIN_20,
-        embassy_rp::pwm::Config::default(),
-    );
-    pico_display::PicoDisplay::new(
-        pico_display::DisplayKind::PicoDisplay2_0,
-        pico_display::DisplayRotation::Rotate0,
-        peripherals.SPI0,
-        clk,
-        mosi,
-        display_cs,
-        dc,
-        bl_pwm,
-    );
-
     let rng = RoscRng;
     (pwr, wifi_spi, rng)
 }
 
-fn initialize_peripherals_no_net() {
+async fn initialize_peripherals_no_net() {
     let peripherals = embassy_rp::init(Default::default());
 
     let mosi = peripherals.PIN_19;
@@ -107,18 +86,20 @@ fn initialize_peripherals_no_net() {
         peripherals.PIN_20,
         embassy_rp::pwm::Config::default(),
     );
-
+    let tx_dma = peripherals.DMA_CH0;
     let mut display = pico_display::PicoDisplay::new(
         pico_display::DisplayKind::PicoDisplay2_0,
         pico_display::DisplayRotation::Rotate0,
         peripherals.SPI0,
         clk,
         mosi,
+        tx_dma,
         display_cs,
         dc,
         bl_pwm,
-    );
-    display.clear(pico_display::RGB565::white());
+    )
+    .await;
+    display.clear(pico_display::RGB565::white()).await;
     loop {
         let sleep_sec = 1;
         info!("Sleeping for {} seconds", sleep_sec);
@@ -220,7 +201,7 @@ async fn main(_spawner: Spawner) {
         env!("CARGO_PKG_VERSION")
     );
 
-    initialize_peripherals_no_net();
+    initialize_peripherals_no_net().await;
     loop {
         let sleep_sec = 1;
         info!("Sleeping for {} seconds", sleep_sec);
