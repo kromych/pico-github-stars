@@ -16,9 +16,9 @@ use rand_chacha::ChaCha8Rng;
 use serde::Deserialize;
 
 const HOST: &str = env!("HOST");
-const REQ_HEADERS: &[u8] = b"GET /repos/kromych/pico-github-stars HTTP/1.1\r\n\
+const REQ_HEADERS: &[u8] = b"GET /repos/microsoft/openvmm HTTP/1.1\r\n\
 Host: api.github.com\r\n\
-User-Agent: kromych/pico-github-stars\r\n\
+User-Agent: curl/8.7.1\r\n\
 Accept: application/vnd.github+json\r\n\
 X-GitHub-Api-Version:2022-11-28\r\n\
 Connection: close\r\n\
