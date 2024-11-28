@@ -57,7 +57,7 @@ pub fn delay_ms(ms: u32) {
 pub struct PicoDisplay<T: spi::Instance + 'static> {
     kind: DisplayKind,
     rotation: DisplayRotation,
-    frame_size: u32,
+    pixel_count: u32,
     spi: Spi<'static, T, spi::Async>,
     dc: Output<'static>,
     cs: Output<'static>,
@@ -178,12 +178,12 @@ impl<T: spi::Instance> PicoDisplay<T> {
         let spi: Spi<'static, T, spi::Async> = Spi::new_txonly(spi, clk, mosi, tx_dma, spi_config);
 
         // Assuming 16-bit color depth (RGB565)
-        let frame_size =
-            get_display_dimensions(kind).0 as u32 * get_display_dimensions(kind).1 as u32 * 2;
+        let pixel_count =
+            get_display_dimensions(kind).0 as u32 * get_display_dimensions(kind).1 as u32;
         let mut display = Self {
             kind,
             rotation,
-            frame_size,
+            pixel_count,
             spi,
             dc,
             cs,
@@ -503,7 +503,7 @@ impl<T: spi::Instance> PicoDisplay<T> {
 
     pub async fn clear(&mut self, color: RGB565) {
         self.write_command(Command::RAMWR).await;
-        for _ in 0..self.frame_size - 1 {
+        for _ in 0..self.pixel_count - 1 {
             self.spi.write(&color.into_bits().to_be_bytes()).await.ok();
         }
     }
