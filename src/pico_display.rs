@@ -462,26 +462,14 @@ impl<T: spi::Instance> PicoDisplay<T> {
             };
         }
 
-        self.write_command_with_data(
-            Command::CASET,
-            &[
-                (caset[0] >> 8) as u8,
-                caset[0] as u8,
-                (caset[1] >> 8) as u8,
-                caset[1] as u8,
-            ],
-        )
-        .await;
-        self.write_command_with_data(
-            Command::RASET,
-            &[
-                (raset[0] >> 8) as u8,
-                raset[0] as u8,
-                (raset[1] >> 8) as u8,
-                raset[1] as u8,
-            ],
-        )
-        .await;
+        self.write_command(Command::CASET).await;
+        self.spi.write(&caset[0].to_be_bytes()).await.ok();
+        self.spi.write(&caset[1].to_be_bytes()).await.ok();
+
+        self.write_command(Command::RASET).await;
+        self.spi.write(&raset[0].to_be_bytes()).await.ok();
+        self.spi.write(&raset[1].to_be_bytes()).await.ok();
+
         self.write_command_with_data(Command::MADCTL, &[madctl])
             .await;
     }
