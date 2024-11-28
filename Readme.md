@@ -1,8 +1,24 @@
 # Pico shows Github stars!
 
-About to be tested. To adjust Wi-Fi and others settings, update [the configuration](.cargo/config.toml).
+To adjust Wi-Fi and others settings, update [the configuration](.cargo/config.toml). The Pico will print GitHub star count to the RTT log.
 
-With MicroPython that would be
+To make flashing faster for development, you may want to flash the Wi-Fi firmware blobs independently
+at hardcoded addresses, instead of baking them into the program with `include_bytes!`:
+
+```bash
+probe-rs download 43439A0.bin --binary-format bin --chip RP2040 --base-address 0x10100000
+probe-rs download 43439A0_clm.bin --binary-format bin --chip RP2040 --base-address 0x10140000
+```
+
+and do this in the Rust code:
+
+```rust
+let fw = unsafe { core::slice::from_raw_parts(0x10100000 as *const u8, 230321) };
+let clm = unsafe { core::slice::from_raw_parts(0x10140000 as *const u8, 4752) };
+```
+
+As for the other approaches to retrieving the star count, with MicroPython that would be
+
 ```python
 import network
 import socket
@@ -60,6 +76,7 @@ print("star gazers:", response_json["stargazers_count"])
 ```
 
 With `wget` could be:
+
 ```bash
 wget -dvO - --secure-protocol=TLSv1_3 https://api.github.com/repos/kromych/pico-github-stars
 ```
@@ -70,6 +87,7 @@ curl -v --http1.1 --tlsv1.2 https://api.github.com/repos/kromych/pico-github-sta
 ```
 
 Employing `openssl`:
+
 ```bash
 # Removing "-quiet" prints detailed data about the ciphers and handshake
 (echo -ne "GET /repos/kromych/pico-github-stars HTTP/1.1\r\n\
@@ -79,6 +97,9 @@ Accept: application/vnd.github+json\r\n\
 X-GitHub-Api-Version:2022-11-28\r\n\
 Connection: close\r\n\r\n") | openssl s_client -quiet -tls1_3 -connect api.github.com:443
 ```
+
+Both `wget`, `curl` and `openssl` method could produce a number with the help of `jq`
+(left as an exercise to the reader).
 
 Finally, with Python:
 
