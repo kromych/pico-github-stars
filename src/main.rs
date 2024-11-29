@@ -2,39 +2,38 @@
 #![no_main]
 
 use core::convert::TryInto;
-use display_interface_spi::SPIInterface;
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::{
     pixelcolor::{raw::RawU16, Rgb565},
     prelude::*,
     primitives::Rectangle,
 };
-use embedded_hal::blocking::delay::DelayUs;
-use embedded_hal::digital::v2::{InputPin, OutputPin};
-use embedded_hal::spi::{MODE_0, MODE_3};
+use embedded_hal::digital::{InputPin, OutputPin};
 use fugit::RateExtU32;
-use hal::gpio::Pins;
-use hal::pac;
-use hal::spi::Spi;
 use rp2040_hal::clocks::{ClocksManager, InitError};
-use rp2040_hal::gpio::{DynFunction, DynPin, DynPinMode};
+use rp2040_hal::gpio::Pins;
+use rp2040_hal::gpio::{
+    FunctionSioInput, FunctionSioOutput, FunctionSpi, Pin, PinId, PullDown, PullNone,
+};
+use rp2040_hal::pac;
 use rp2040_hal::pll::PLLConfig;
-use rp2040_hal::{self as hal, Clock, Watchdog};
-use st7789::{TearingEffect, ST7789};
+use rp2040_hal::spi::Spi;
+use rp2040_hal::{self, Clock, Watchdog};
 
-use defmt::*;
+use cortex_m::prelude::_embedded_hal_blocking_delay_DelayUs;
 use defmt_rtt as _;
+use embedded_hal::spi::SpiBus;
 use panic_probe as _;
 
 mod time {
     pub fn time_us() -> u32 {
-        unsafe { (*rp2040_pac::TIMER::PTR).timerawl.read().bits() }
+        unsafe { (*rp2040_pac::TIMER::PTR).timerawl().read().bits() }
     }
 
     pub fn time_us64() -> u64 {
         unsafe {
-            (*rp2040_pac::TIMER::PTR).timelr.read().bits() as u64
-                | (((*rp2040_pac::TIMER::PTR).timehr.read().bits() as u64) << 32)
+            (*rp2040_pac::TIMER::PTR).timelr().read().bits() as u64
+                | (((*rp2040_pac::TIMER::PTR).timehr().read().bits() as u64) << 32)
         }
     }
 }
@@ -58,43 +57,43 @@ mod dma {
         pub unsafe fn new(channel: usize) -> Self {
             DmaChannel {
                 channel,
-                ch: &(*rp2040_pac::DMA::PTR).ch[channel],
+                ch: &(*rp2040_pac::DMA::PTR).ch(channel),
             }
         }
 
         pub unsafe fn set_src(&mut self, src: u32) {
-            self.ch.ch_read_addr.write(|w| w.bits(src));
+            self.ch.ch_read_addr().write(|w| w.bits(src));
         }
 
         pub unsafe fn set_dst(&mut self, dst: u32) {
-            self.ch.ch_write_addr.write(|w| w.bits(dst));
+            self.ch.ch_write_addr().write(|w| w.bits(dst));
         }
 
         pub unsafe fn set_count(&mut self, count: u32) {
-            self.ch.ch_trans_count.write(|w| w.bits(count));
+            self.ch.ch_trans_count().write(|w| w.bits(count));
         }
 
         pub unsafe fn set_ctrl_and_trigger<F>(&mut self, f: F)
         where
             F: FnOnce(&mut CtrlWriter) -> &mut W<CtrlReg>,
         {
-            self.ch.ch_ctrl_trig.write(f);
+            self.ch.ch_ctrl_trig().write(f);
         }
 
         pub fn wait(&self) {
-            while self.ch.ch_trans_count.read().bits() > 0 {}
+            while self.ch.ch_trans_count().read().bits() > 0 {}
         }
 
         pub fn get_src(&self) -> u32 {
-            self.ch.ch_read_addr.read().bits()
+            self.ch.ch_read_addr().read().bits()
         }
 
         pub fn get_dst(&self) -> u32 {
-            self.ch.ch_write_addr.read().bits()
+            self.ch.ch_write_addr().read().bits()
         }
 
         pub fn get_count(&self) -> u32 {
-            self.ch.ch_trans_count.read().bits()
+            self.ch.ch_trans_count().read().bits()
         }
     }
 
@@ -209,12 +208,12 @@ mod dma {
     pub unsafe fn copy_flash_to_mem(dma_channel: &mut DmaChannel, src: u32, dst: u32, count: u32) {
         // Flush XIP FIFO.
         let xip_ctrl = &*rp2040_pac::XIP_CTRL::PTR;
-        while xip_ctrl.stat.read().fifo_empty().bit_is_clear() {
+        while xip_ctrl.stat().read().fifo_empty().bit_is_clear() {
             defmt::info!("XIP FIFO not empty");
             cortex_m::asm::nop();
         }
-        xip_ctrl.stream_addr.write(|w| w.bits(src));
-        xip_ctrl.stream_ctr.write(|w| w.bits(count));
+        xip_ctrl.stream_addr().write(|w| w.bits(src));
+        xip_ctrl.stream_ctr().write(|w| w.bits(count));
 
         let channel = dma_channel.channel;
         dma_channel.set_src(0x50400000); // XIP_AUX_BASE
@@ -230,7 +229,7 @@ mod dma {
         });
         dma_channel.wait();
 
-        while xip_ctrl.stat.read().fifo_empty().bit_is_clear() {
+        while xip_ctrl.stat().read().fifo_empty().bit_is_clear() {
             defmt::info!("XIP FIFO not empty");
             cortex_m::asm::nop();
         }
@@ -267,85 +266,183 @@ pub fn framebuffer() -> &'static mut [u16] {
     unsafe { core::slice::from_raw_parts_mut(FRAMEBUFFER.as_ptr() as *mut u16, WIDTH * HEIGHT) }
 }
 
-pub type RealDisplay = st7789::ST7789<
-    SPIInterface<Spi<hal::spi::Enabled, pac::SPI0, 8>, DynPin, DynPin>,
-    DynPin,
-    DynPin,
->;
+#[allow(clippy::upper_case_acronyms, dead_code)]
+#[derive(Copy, Clone, Debug)]
+#[repr(u8)]
+/// ST7789 commands
+enum Command {
+    NOP = 0x00,
+    SWRESET = 0x01,
+    RDDID = 0x04,
+    RDDST = 0x09,
+    SLPIN = 0x10,
+    SLPOUT = 0x11,
+    PTLON = 0x12,
+    NORON = 0x13,
+    INVOFF = 0x20,
+    INVON = 0x21,
+    GAMSET = 0x26,
+    DISPOFF = 0x28,
+    DISPON = 0x29,
+    CASET = 0x2A,
+    RASET = 0x2B,
+    RAMWR = 0x2C,
+    RAMRD = 0x2E,
+    PTLAR = 0x30,
+    VSCRDER = 0x33,
+    TEOFF = 0x34,
+    TEON = 0x35,
+    MADCTL = 0x36,
+    VSCAD = 0x37,
+    COLMOD = 0x3A,
+    PORCTRL = 0xB2,
+    GCTRL = 0xB7,
+    VCOMS = 0xBB,
+    LCMCTRL = 0xC0,
+    VDVVRHEN = 0xC2,
+    VRHS = 0xC3,
+    VDVS = 0xC4,
+    VCMOFSET = 0xC5,
+    FRCTRL2 = 0xC6,
+    PWMFRSEL = 0xCC,
+    PWCTRL1 = 0xD0,
+    _D6 = 0xD6,
+    GMCTRP1 = 0xE0,
+    GMCTRN1 = 0xE1,
+}
 
-pub struct Display {
-    st7789: RealDisplay,
-    lcd_vsync_pin: DynPin,
+pub struct Display<BL, DC, CS, VSYNC, SPIDEV, SPIPINOUT>
+where
+    BL: PinId,
+    DC: PinId,
+    CS: PinId,
+    VSYNC: PinId,
+    SPIDEV: rp2040_hal::spi::SpiDevice,
+    SPIPINOUT: rp2040_hal::spi::ValidSpiPinout<SPIDEV>,
+{
+    backlight_pin: Pin<BL, FunctionSioOutput, PullDown>,
+    dc_pin: Pin<DC, FunctionSioOutput, PullDown>,
+    cs_pin: Pin<CS, FunctionSioOutput, PullDown>,
+    vsync_pin: Pin<VSYNC, FunctionSioInput, PullNone>,
+    spi_device: Spi<rp2040_hal::spi::Enabled, SPIDEV, SPIPINOUT, 8>,
     dma_channel: dma::DmaChannel,
     last_vsync_time: u32,
 }
 
-/*
-    let spi_screen =
-        Spi::<_, _, 8>::new(hw.SPI0).init( p.RESETS, 125u32.MHz(), 16u32.MHz(), &MODE_0);
-    let spii_screen = SPIInterface::new(spi_screen, hw.lcd_dc_pin, hw.lcd_cs_pin);
-    let mut display = mipidsi::Builder::st7789(spii_screen)
-        .with_display_size(240, 240)
-        .with_framebuffer_size(240, 240)
-        .init(&mut delay, Some(DummyPin))
-        .unwrap();
-
-*/
-
-impl Display {
+impl<
+        BL: PinId,
+        DC: PinId,
+        CS: PinId,
+        VSYNC: PinId,
+        SPIDEV: rp2040_hal::spi::SpiDevice,
+        SPIPINOUT: rp2040_hal::spi::ValidSpiPinout<SPIDEV>,
+    > Display<BL, DC, CS, VSYNC, SPIDEV, SPIPINOUT>
+{
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        mut backlight_pin: DynPin,
-        mut lcd_dc_pin: DynPin,
-        mut lcd_cs_pin: DynPin,
-        mut lcd_sck_pin: DynPin,
-        mut lcd_mosi_pin: DynPin,
-        mut lcd_vsync_pin: DynPin,
-        spi_device: pac::SPI0,
-        resets: &mut pac::RESETS,
-        delay_source: &mut impl DelayUs<u32>,
+        backlight_pin: Pin<BL, FunctionSioOutput, PullDown>,
+        dc_pin: Pin<DC, FunctionSioOutput, PullDown>,
+        cs_pin: Pin<CS, FunctionSioOutput, PullDown>,
+        vsync_pin: Pin<VSYNC, FunctionSioInput, PullNone>,
+        spi_device: Spi<rp2040_hal::spi::Enabled, SPIDEV, SPIPINOUT, 8>,
+        delay_source: &mut cortex_m::delay::Delay,
         dma_channel: dma::DmaChannel,
-    ) -> Display {
-        info!("Initializing display");
-        backlight_pin.into_push_pull_output();
-        lcd_dc_pin.into_push_pull_output();
-        lcd_cs_pin.into_push_pull_output();
-        lcd_cs_pin.set_low().unwrap();
-        lcd_sck_pin
-            .try_into_mode(DynPinMode::Function(DynFunction::Spi))
-            .unwrap();
-        lcd_mosi_pin
-            .try_into_mode(DynPinMode::Function(DynFunction::Spi))
-            .unwrap();
-        lcd_vsync_pin.into_floating_input();
-        let spi =
-            Spi::<_, _, 8>::new(spi_device).init(resets, 125.MHz(), 62_500_000u32.Hz(), &MODE_0);
-        let di = SPIInterface::new(spi, lcd_dc_pin, lcd_cs_pin);
-        let mut st7789 = ST7789::new(di, None, Some(backlight_pin), WIDTH as u16, HEIGHT as u16);
-        st7789.init(delay_source).unwrap();
-        st7789.set_tearing_effect(TearingEffect::Vertical).unwrap();
-        let mut display = Display {
-            st7789,
+    ) -> Self {
+        let mut display = Self {
+            backlight_pin,
+            dc_pin,
+            cs_pin,
+            vsync_pin,
+            spi_device,
             dma_channel,
-            lcd_vsync_pin,
             last_vsync_time: 0,
         };
-        // A single clear occasionally fails to clear the screen.
-        for _ in 0..2 {
-            // let colors =
-            // core::iter::repeat(RawU16::from(Rgb565::BLACK).into_inner()).take(WIDTH * HEIGHT);
-            let colors = core::iter::repeat(Rgb565::BLACK.into_storage()).take(WIDTH * HEIGHT);
-            display
-                .st7789
-                .set_pixels(0, 0, (WIDTH - 1) as u16, (HEIGHT - 1) as u16, colors)
-                .unwrap();
+
+        display.backlight_pin.set_low().unwrap();
+        delay_source.delay_us(10_000);
+
+        display.write_command(Command::SWRESET); // reset display
+        delay_source.delay_us(150_000);
+        display.write_command(Command::SLPOUT); // turn off sleep
+        delay_source.delay_us(10_000);
+        display.write_command(Command::INVOFF); // turn off invert
+        display.write_command(Command::VSCRDER); // vertical scroll definition
+        display.write_data(&[0u8, 0u8, 0x14u8, 0u8, 0u8, 0u8]); // 0 TSA, 320 VSA, 0 BSA
+        display.write_command(Command::MADCTL); // left -> right, bottom -> top RGB
+        display.write_data(&[0b0000_0000]);
+        display.write_command(Command::COLMOD); // 16bit 65k colors
+        display.write_data(&[0b0101_0101]);
+        display.write_command(Command::INVON); // hack?
+        delay_source.delay_us(10_000);
+        display.write_command(Command::NORON); // turn on display
+        delay_source.delay_us(10_000);
+        display.write_command(Command::DISPON); // turn on display
+        delay_source.delay_us(10_000);
+
+        display.write_command(Command::TEON); // tear effect on
+        display.write_data(&[0]); // Horizontal blanking
+        delay_source.delay_us(10_000);
+
+        display.backlight_pin.set_high().unwrap();
+        delay_source.delay_us(10_000);
+
+        display
+    }
+
+    #[inline(always)]
+    fn write_command(&mut self, command: Command) {
+        self.cs_pin.set_low().unwrap();
+
+        self.dc_pin.set_low().unwrap();
+        self.spi_device.write(&[command as u8]).unwrap(); // TODO: Handle error
+        self.cs_pin.set_high().unwrap();
+
+        // defmt::info!("Command 0x{:x}", command as u8);
+    }
+
+    #[inline(always)]
+    fn write_data(&mut self, data: &[u8]) {
+        self.cs_pin.set_low().unwrap();
+
+        self.dc_pin.set_high().unwrap();
+        self.spi_device.write(data).unwrap(); // TODO: Handle error
+        self.cs_pin.set_high().unwrap();
+
+        // defmt::info!("Command 0x{:x}", command as u8);
+    }
+
+    fn set_address_window(&mut self, sx: u16, sy: u16, ex: u16, ey: u16) {
+        self.write_command(Command::CASET);
+        self.write_data(&sx.to_be_bytes());
+        self.write_data(&ex.to_be_bytes());
+        self.write_command(Command::RASET);
+        self.write_data(&sy.to_be_bytes());
+        self.write_data(&ey.to_be_bytes());
+    }
+
+    pub fn set_pixel(&mut self, x: u16, y: u16, color: u16) {
+        self.set_address_window(x, y, x, y);
+        self.write_command(Command::RAMWR);
+        self.write_data(&color.to_be_bytes());
+    }
+
+    pub fn set_pixels<T>(&mut self, sx: u16, sy: u16, ex: u16, ey: u16, colors: T)
+    where
+        T: IntoIterator<Item = u16>,
+    {
+        self.set_address_window(sx, sy, ex, ey);
+        self.write_command(Command::RAMWR);
+        for color in colors {
+            self.write_data(&color.to_be_bytes());
         }
-        display
-            .st7789
-            .set_pixel(2, 2, Rgb565::BLUE.into_storage())
-            .unwrap();
-        display.enable_backlight(delay_source);
-        display
+    }
+
+    pub fn fill(&mut self, color: u16) {
+        self.set_address_window(0, 0, WIDTH as u16 - 1, HEIGHT as u16 - 1);
+        self.write_command(Command::RAMWR);
+        for _ in 0..WIDTH * HEIGHT {
+            self.write_data(&color.to_be_bytes());
+        }
     }
 
     fn start_flush(&mut self) {
@@ -353,7 +450,7 @@ impl Display {
             dma::start_copy_to_spi(
                 &mut self.dma_channel,
                 framebuffer().as_ptr() as u32,
-                (*pac::SPI0::PTR).sspdr.as_ptr() as u32,
+                (*pac::SPI0::PTR).sspdr().as_ptr() as u32, // TODO: SPI0 TX FIFO, hardcoded for now
                 1,
                 (WIDTH * HEIGHT * 2) as u32,
             );
@@ -382,16 +479,12 @@ impl Display {
         self.start_flush();
     }
 
-    pub fn enable_backlight(&mut self, delay_source: &mut impl DelayUs<u32>) {
-        self.st7789
-            .set_backlight(st7789::BacklightState::On, delay_source)
-            .unwrap();
+    pub fn enable_backlight(&mut self) {
+        self.backlight_pin.set_high().unwrap();
     }
 
-    pub fn disable_backlight(&mut self, delay_source: &mut impl DelayUs<u32>) {
-        self.st7789
-            .set_backlight(st7789::BacklightState::Off, delay_source)
-            .unwrap();
+    pub fn disable_backlight(&mut self) {
+        self.backlight_pin.set_low().unwrap();
     }
 
     pub fn wait_for_vsync(&mut self) {
@@ -399,8 +492,8 @@ impl Display {
             defmt::info!("Missed vsync");
         } */
         // defmt::info!("frametime {0}",time::time_us() - self.last_vsync_time);
-        while self.lcd_vsync_pin.is_high().unwrap() {}
-        while self.lcd_vsync_pin.is_low().unwrap() {}
+        while self.vsync_pin.is_high().unwrap() {}
+        while self.vsync_pin.is_low().unwrap() {}
         self.last_vsync_time = time::time_us();
     }
 
@@ -412,7 +505,29 @@ impl Display {
     }
 }
 
-impl DrawTarget for Display {
+impl<
+        BL: PinId,
+        DC: PinId,
+        CS: PinId,
+        VSYNC: PinId,
+        SPIDEV: rp2040_hal::spi::SpiDevice,
+        SPIPINOUT: rp2040_hal::spi::ValidSpiPinout<SPIDEV>,
+    > OriginDimensions for Display<BL, DC, CS, VSYNC, SPIDEV, SPIPINOUT>
+{
+    fn size(&self) -> Size {
+        Size::new(WIDTH as u32, HEIGHT as u32)
+    }
+}
+
+impl<
+        BL: PinId,
+        DC: PinId,
+        CS: PinId,
+        VSYNC: PinId,
+        SPIDEV: rp2040_hal::spi::SpiDevice,
+        SPIPINOUT: rp2040_hal::spi::ValidSpiPinout<SPIDEV>,
+    > DrawTarget for Display<BL, DC, CS, VSYNC, SPIDEV, SPIPINOUT>
+{
     type Color = Rgb565;
     type Error = core::convert::Infallible;
 
@@ -501,65 +616,20 @@ impl DrawTarget for Display {
     }
 }
 
-impl OriginDimensions for Display {
-    fn size(&self) -> Size {
-        Size::new(WIDTH as u32, HEIGHT as u32)
-    }
-}
-
-pub struct XorDisplay<'a> {
-    display: &'a mut Display,
-}
-
-impl<'a> XorDisplay<'a> {
-    pub fn new(display: &'a mut Display) -> XorDisplay {
-        XorDisplay { display }
-    }
-}
-
-impl<'a> DrawTarget for XorDisplay<'a> {
-    type Color = Rgb565;
-    type Error = core::convert::Infallible;
-
-    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
-    where
-        I: IntoIterator<Item = Pixel<Self::Color>>,
-    {
-        const M: u32 = WIDTH as u32 - 1;
-        let fb = framebuffer();
-        for Pixel(coord, color) in pixels.into_iter() {
-            if let Ok((x @ 0..=M, y @ 0..=M)) = coord.try_into() {
-                let index: u32 = x + y * WIDTH as u32;
-                let color = RawU16::from(color).into_inner();
-                fb[index as usize] ^= color.to_be();
-            }
-        }
-
-        Ok(())
-    }
-}
-
-impl<'a> OriginDimensions for XorDisplay<'a> {
-    fn size(&self) -> Size {
-        self.display.size()
-    }
-}
-
 #[rp_pico::entry]
 fn main() -> ! {
     defmt::info!(
         "Board {}, git revision {:x}, ROM verion {:x}",
-        hal::rom_data::copyright_string(),
-        hal::rom_data::git_revision(),
-        hal::rom_data::rom_version_number(),
+        rp2040_hal::rom_data::copyright_string(),
+        rp2040_hal::rom_data::git_revision(),
+        rp2040_hal::rom_data::rom_version_number(),
     );
 
     let mut pac = pac::Peripherals::take().unwrap();
     let core = pac::CorePeripherals::take().unwrap();
-    let mut watchdog = hal::watchdog::Watchdog::new(pac.WATCHDOG);
+    let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
 
-    // The default is to generate a 125 MHz system clock
-    let clocks = init_clocks_and_plls(
+    let clocks = rp2040_hal::clocks::init_clocks_and_plls(
         rp_pico::XOSC_CRYSTAL_FREQ,
         pac.XOSC,
         pac.CLOCKS,
@@ -571,9 +641,7 @@ fn main() -> ! {
     .ok()
     .unwrap();
 
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
-
-    let sio = hal::sio::Sio::new(pac.SIO);
+    let sio = rp2040_hal::sio::Sio::new(pac.SIO);
     let pins = Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
@@ -589,77 +657,36 @@ fn main() -> ! {
     green_led_pin.set_high().unwrap();
     blue_led_pin.set_high().unwrap();
 
-    let backlight_pin = pins.gpio20.into();
-    let lcd_dc_pin = pins.gpio16.into();
-    let lcd_cs_pin = pins.gpio17.into();
-    let lcd_sck_pin = pins.gpio18.into();
-    let lcd_mosi_pin = pins.gpio19.into();
-    let lcd_vsync_pin = pins.gpio21.into();
+    let backlight_pin = pins.gpio20.into_push_pull_output();
+    let dc_pin = pins.gpio16.into_push_pull_output();
+    let cs_pin = pins.gpio17.into_push_pull_output();
+    let sck_pin = pins.gpio18.into_function::<FunctionSpi>();
+    let mosi_pin = pins.gpio19.into_function::<FunctionSpi>();
+    let vsync_pin = pins.gpio21.into_floating_input();
+    let spi_device = Spi::<_, _, _, 8>::new(pac.SPI0, (mosi_pin, sck_pin));
+    let spi_device = spi_device.init(
+        &mut pac.RESETS,
+        clocks.peripheral_clock.freq(),
+        62_500.kHz(),
+        embedded_hal::spi::MODE_0,
+    );
 
+    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
     let mut display = Display::new(
         backlight_pin,
-        lcd_dc_pin,
-        lcd_cs_pin,
-        lcd_sck_pin,
-        lcd_mosi_pin,
-        lcd_vsync_pin,
-        pac.SPI0,
-        &mut pac.RESETS,
+        dc_pin,
+        cs_pin,
+        vsync_pin,
+        spi_device,
         &mut delay,
         unsafe { dma::DmaChannel::new(dma::CHANNEL_FRAMEBUFFER) },
     );
+    display.fill(Rgb565::BLACK.into_storage());
+    delay.delay_ms(1000);
     display.clear(Rgb565::BLUE).unwrap();
     display.flush();
 
     loop {
         cortex_m::asm::wfe();
     }
-}
-
-// Copied and modified from rp2040_hal crate.
-fn init_clocks_and_plls(
-    xosc_crystal_freq: u32,
-    xosc_dev: pac::XOSC,
-    clocks_dev: pac::CLOCKS,
-    pll_sys_dev: pac::PLL_SYS,
-    pll_usb_dev: pac::PLL_USB,
-    resets: &mut pac::RESETS,
-    watchdog: &mut Watchdog,
-) -> Result<ClocksManager, InitError> {
-    let xosc = rp2040_hal::xosc::setup_xosc_blocking(xosc_dev, xosc_crystal_freq.Hz())
-        .map_err(InitError::XoscErr)?;
-
-    // Configure watchdog tick generation to tick over every microsecond
-    watchdog.enable_tick_generation((xosc_crystal_freq / 1_000_000) as u8);
-
-    let mut clocks = ClocksManager::new(clocks_dev);
-
-    let pll_sys_180mhz: PLLConfig = PLLConfig {
-        vco_freq: 716.MHz(),
-        refdiv: 1,
-        post_div1: 4,
-        post_div2: 1,
-    };
-
-    let pll_sys = rp2040_hal::pll::setup_pll_blocking(
-        pll_sys_dev,
-        xosc.operating_frequency(),
-        pll_sys_180mhz,
-        &mut clocks,
-        resets,
-    )
-    .map_err(InitError::PllError)?;
-    let pll_usb = rp2040_hal::pll::setup_pll_blocking(
-        pll_usb_dev,
-        xosc.operating_frequency(),
-        rp2040_hal::pll::common_configs::PLL_USB_48MHZ,
-        &mut clocks,
-        resets,
-    )
-    .map_err(InitError::PllError)?;
-
-    clocks
-        .init_default(&xosc, &pll_sys, &pll_usb)
-        .map_err(InitError::ClockError)?;
-    Ok(clocks)
 }
