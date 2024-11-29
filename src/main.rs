@@ -9,8 +9,9 @@ use embedded_graphics::{
     primitives::Rectangle,
 };
 use embedded_hal::digital::{InputPin, OutputPin};
+use embedded_hal::pwm::SetDutyCycle;
 use fugit::{HertzU32, RateExtU32};
-use rp2040_hal::gpio::Pins;
+use rp2040_hal::gpio::{FunctionPwm, Pins};
 use rp2040_hal::gpio::{
     FunctionSioInput, FunctionSioOutput, FunctionSpi, Pin, PinId, PullDown, PullNone,
 };
@@ -22,6 +23,8 @@ use defmt_rtt as _;
 use embedded_hal::spi::SpiBus;
 use panic_probe as _;
 use rp2040_pac::RESETS;
+
+mod float;
 
 mod time {
     pub fn time_us() -> u32 {
@@ -309,16 +312,18 @@ enum Command {
     GMCTRN1 = 0xE1,
 }
 
-pub struct Display<BL, DC, CS, VSYNC, SPIDEV, SPIPINOUT>
+pub struct Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN>
 where
-    BL: PinId,
     DC: PinId,
     CS: PinId,
     VSYNC: PinId,
     SPIDEV: rp2040_hal::spi::SpiDevice,
     SPIPINOUT: rp2040_hal::spi::ValidSpiPinout<SPIDEV>,
+    PWMSLICE: rp2040_hal::pwm::AnySlice,
+    PWMCHAN: rp2040_hal::pwm::ChannelId,
+    rp2040_hal::pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
 {
-    backlight_pin: Pin<BL, FunctionSioOutput, PullDown>,
+    backlight_pwm: rp2040_hal::pwm::Channel<PWMSLICE, PWMCHAN>,
     dc_pin: Pin<DC, FunctionSioOutput, PullDown>,
     cs_pin: Pin<CS, FunctionSioOutput, PullDown>,
     vsync_pin: Pin<VSYNC, FunctionSioInput, PullNone>,
@@ -328,17 +333,20 @@ where
 }
 
 impl<
-        BL: PinId,
         DC: PinId,
         CS: PinId,
         VSYNC: PinId,
         SPIDEV: rp2040_hal::spi::SpiDevice,
         SPIPINOUT: rp2040_hal::spi::ValidSpiPinout<SPIDEV>,
-    > Display<BL, DC, CS, VSYNC, SPIDEV, SPIPINOUT>
+        PWMSLICE: rp2040_hal::pwm::AnySlice,
+        PWMCHAN: rp2040_hal::pwm::ChannelId,
+    > Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN>
+where
+    rp2040_hal::pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new<F, B>(
-        backlight_pin: Pin<BL, FunctionSioOutput, PullDown>,
+        backlight_pwm: rp2040_hal::pwm::Channel<PWMSLICE, PWMCHAN>,
         dc_pin: Pin<DC, FunctionSioOutput, PullDown>,
         cs_pin: Pin<CS, FunctionSioOutput, PullDown>,
         vsync_pin: Pin<VSYNC, FunctionSioInput, PullNone>,
@@ -363,7 +371,7 @@ impl<
             embedded_hal::spi::MODE_0,
         );
         let mut display = Self {
-            backlight_pin,
+            backlight_pwm,
             dc_pin,
             cs_pin,
             vsync_pin,
@@ -372,7 +380,7 @@ impl<
             last_vsync_time: 0,
         };
 
-        display.backlight_pin.set_low().unwrap();
+        display.no_backlight();
         delay_source.delay_us(10_000);
 
         display.write_command(Command::SWRESET); // reset display
@@ -397,7 +405,7 @@ impl<
         display.write_data(&[0]); // Horizontal blanking
         delay_source.delay_us(10_000);
 
-        display.backlight_pin.set_high().unwrap();
+        display.set_backlight(20);
         delay_source.delay_us(10_000);
 
         display
@@ -493,12 +501,28 @@ impl<
         self.start_flush();
     }
 
-    pub fn enable_backlight(&mut self) {
-        self.backlight_pin.set_high().unwrap();
+    pub fn set_backlight(&mut self, value: u8) {
+        const GAMMA: f32 = 2.8;
+        let pwm = (float::rom_instrinsics::powf32((value as f32) / 255.0f32, GAMMA) * 65535.0f32
+            + 0.5f32) as u16;
+
+        // defmt::info!("ROM computed backlight setting: {}", pwm);
+        // let pwm = (float::handrolled::powf32((value as f32) / 255.0f32, GAMMA) * 65535.0f32
+        //     + 0.5f32) as u16;
+        defmt::info!("Setting backlight to {}", pwm);
+        self.backlight_pwm
+            .set_duty_cycle_fraction(value as u16, 255)
+            .unwrap();
     }
 
-    pub fn disable_backlight(&mut self) {
-        self.backlight_pin.set_low().unwrap();
+    pub fn full_backlight(&mut self) {
+        defmt::info!("Enabling backlight fully");
+        self.backlight_pwm.set_duty_cycle_fully_on().unwrap();
+    }
+
+    pub fn no_backlight(&mut self) {
+        defmt::info!("Disabling backlight");
+        self.backlight_pwm.set_duty_cycle_fully_off().unwrap();
     }
 
     pub fn wait_for_vsync(&mut self) {
@@ -520,13 +544,16 @@ impl<
 }
 
 impl<
-        BL: PinId,
         DC: PinId,
         CS: PinId,
         VSYNC: PinId,
         SPIDEV: rp2040_hal::spi::SpiDevice,
         SPIPINOUT: rp2040_hal::spi::ValidSpiPinout<SPIDEV>,
-    > OriginDimensions for Display<BL, DC, CS, VSYNC, SPIDEV, SPIPINOUT>
+        PWMSLICE: rp2040_hal::pwm::AnySlice,
+        PWMCHAN: rp2040_hal::pwm::ChannelId,
+    > OriginDimensions for Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN>
+where
+    rp2040_hal::pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
 {
     fn size(&self) -> Size {
         Size::new(WIDTH as u32, HEIGHT as u32)
@@ -534,13 +561,16 @@ impl<
 }
 
 impl<
-        BL: PinId,
         DC: PinId,
         CS: PinId,
         VSYNC: PinId,
         SPIDEV: rp2040_hal::spi::SpiDevice,
         SPIPINOUT: rp2040_hal::spi::ValidSpiPinout<SPIDEV>,
-    > DrawTarget for Display<BL, DC, CS, VSYNC, SPIDEV, SPIPINOUT>
+        PWMSLICE: rp2040_hal::pwm::AnySlice,
+        PWMCHAN: rp2040_hal::pwm::ChannelId,
+    > DrawTarget for Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN>
+where
+    rp2040_hal::pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
 {
     type Color = Rgb565;
     type Error = core::convert::Infallible;
@@ -671,16 +701,23 @@ fn main() -> ! {
     green_led_pin.set_high().unwrap();
     blue_led_pin.set_high().unwrap();
 
-    let backlight_pin = pins.gpio20.into_push_pull_output();
+    let backlight_pin = pins.gpio20.into_function::<FunctionPwm>();
     let dc_pin = pins.gpio16.into_push_pull_output();
     let cs_pin = pins.gpio17.into_push_pull_output();
     let sck_pin = pins.gpio18.into_function::<FunctionSpi>();
     let mosi_pin = pins.gpio19.into_function::<FunctionSpi>();
     let vsync_pin = pins.gpio21.into_floating_input();
 
+    let pwm_slices = rp2040_hal::pwm::Slices::new(pac.PWM, &mut pac.RESETS);
+    let mut backlight_pwm = pwm_slices.pwm2;
+    backlight_pwm.set_ph_correct();
+    backlight_pwm.enable();
+    backlight_pwm.channel_a.output_to(backlight_pin);
+    backlight_pwm.channel_a.set_duty_cycle(0).unwrap();
+
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
     let mut display = Display::new(
-        backlight_pin,
+        backlight_pwm.channel_a,
         dc_pin,
         cs_pin,
         vsync_pin,
@@ -692,7 +729,7 @@ fn main() -> ! {
         62_500.kHz(),
         unsafe { dma::DmaChannel::new(dma::CHANNEL_FRAMEBUFFER) },
     );
-    display.fill(Rgb565::BLACK.into_storage());
+    display.fill(Rgb565::GREEN.into_storage());
     delay.delay_ms(1000);
     display.clear(Rgb565::BLUE).unwrap();
     display.flush();

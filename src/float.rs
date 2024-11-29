@@ -4,8 +4,8 @@
 
 #[cfg(feature = "use-rom-instrinsics")]
 pub mod rom_instrinsics {
-    use embassy_rp::rom_data::float_funcs::fexp;
-    use embassy_rp::rom_data::float_funcs::fln;
+    use rp2040_hal::rom_data::float_funcs::fexp;
+    use rp2040_hal::rom_data::float_funcs::fln;
 
     pub fn powf32(base: f32, exp: f32) -> f32 {
         fexp(exp * fln(base))
