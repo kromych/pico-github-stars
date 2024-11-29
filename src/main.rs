@@ -9,7 +9,7 @@ use embedded_graphics::{
     primitives::Rectangle,
 };
 use embedded_hal::digital::{InputPin, OutputPin};
-use fugit::RateExtU32;
+use fugit::{HertzU32, RateExtU32};
 use rp2040_hal::gpio::Pins;
 use rp2040_hal::gpio::{
     FunctionSioInput, FunctionSioOutput, FunctionSpi, Pin, PinId, PullDown, PullNone,
@@ -21,6 +21,7 @@ use rp2040_hal::{self, Clock};
 use defmt_rtt as _;
 use embedded_hal::spi::SpiBus;
 use panic_probe as _;
+use rp2040_pac::RESETS;
 
 mod time {
     pub fn time_us() -> u32 {
@@ -336,15 +337,31 @@ impl<
     > Display<BL, DC, CS, VSYNC, SPIDEV, SPIPINOUT>
 {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new<F, B>(
         backlight_pin: Pin<BL, FunctionSioOutput, PullDown>,
         dc_pin: Pin<DC, FunctionSioOutput, PullDown>,
         cs_pin: Pin<CS, FunctionSioOutput, PullDown>,
         vsync_pin: Pin<VSYNC, FunctionSioInput, PullNone>,
-        spi_device: Spi<rp2040_hal::spi::Enabled, SPIDEV, SPIPINOUT, 8>,
+        spi_device: SPIDEV,
+        spi_pinout: SPIPINOUT,
         delay_source: &mut cortex_m::delay::Delay,
+        resets: &mut RESETS,
+        peri_frequency: F,
+        baudrate: B,
         dma_channel: dma::DmaChannel,
-    ) -> Self {
+    ) -> Self
+    where
+        F: Into<HertzU32>,
+        B: Into<HertzU32>,
+    {
+        //let sspdr = spi_device.sspdr(); // For DMA
+        let spi_device = Spi::<_, _, _, 8>::new(spi_device, spi_pinout);
+        let spi_device = spi_device.init(
+            resets,
+            peri_frequency.into(),
+            baudrate.into(),
+            embedded_hal::spi::MODE_0,
+        );
         let mut display = Self {
             backlight_pin,
             dc_pin,
@@ -660,13 +677,6 @@ fn main() -> ! {
     let sck_pin = pins.gpio18.into_function::<FunctionSpi>();
     let mosi_pin = pins.gpio19.into_function::<FunctionSpi>();
     let vsync_pin = pins.gpio21.into_floating_input();
-    let spi_device = Spi::<_, _, _, 8>::new(pac.SPI0, (mosi_pin, sck_pin));
-    let spi_device = spi_device.init(
-        &mut pac.RESETS,
-        clocks.peripheral_clock.freq(),
-        62_500.kHz(),
-        embedded_hal::spi::MODE_0,
-    );
 
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
     let mut display = Display::new(
@@ -674,8 +684,12 @@ fn main() -> ! {
         dc_pin,
         cs_pin,
         vsync_pin,
-        spi_device,
+        pac.SPI0,
+        (mosi_pin, sck_pin),
         &mut delay,
+        &mut pac.RESETS,
+        clocks.peripheral_clock.freq(),
+        62_500.kHz(),
         unsafe { dma::DmaChannel::new(dma::CHANNEL_FRAMEBUFFER) },
     );
     display.fill(Rgb565::BLACK.into_storage());
