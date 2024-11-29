@@ -10,21 +10,21 @@ use embedded_graphics::{
     primitives::Rectangle,
 };
 use embedded_hal::blocking::delay::DelayUs;
-use embedded_hal::spi::MODE_3;
+use embedded_hal::digital::v2::{InputPin, OutputPin};
+use embedded_hal::spi::{MODE_0, MODE_3};
 use fugit::RateExtU32;
 use hal::gpio::Pins;
 use hal::pac;
 use hal::spi::Spi;
+use rp2040_hal::clocks::{ClocksManager, InitError};
+use rp2040_hal::gpio::{DynFunction, DynPin, DynPinMode};
+use rp2040_hal::pll::PLLConfig;
 use rp2040_hal::{self as hal, Clock, Watchdog};
 use st7789::{TearingEffect, ST7789};
 
 use defmt::*;
 use defmt_rtt as _;
-use embedded_hal::digital::v2::{InputPin, OutputPin};
 use panic_probe as _;
-use rp2040_hal::clocks::{ClocksManager, InitError};
-use rp2040_hal::gpio::{DynFunction, DynPin, DynPinMode};
-use rp2040_hal::pll::PLLConfig;
 
 mod time {
     pub fn time_us() -> u32 {
@@ -243,6 +243,7 @@ mod dma {
         elem_size: u32,
         count: u32,
     ) {
+        defmt::info!("start_copy_to_spi");
         let channel = dma_channel.channel;
         dma_channel.set_src(src);
         dma_channel.set_dst(dst);
@@ -258,12 +259,12 @@ mod dma {
     }
 }
 
-pub const WIDTH: usize = 320;
-pub const HEIGHT: usize = 240;
+pub const WIDTH: usize = 240;
+pub const HEIGHT: usize = 320;
 
-pub fn framebuffer() -> &'static mut [u16; WIDTH * HEIGHT] {
+pub fn framebuffer() -> &'static mut [u16] {
     static mut FRAMEBUFFER: [u16; WIDTH * HEIGHT] = [0; WIDTH * HEIGHT];
-    unsafe { &mut FRAMEBUFFER }
+    unsafe { core::slice::from_raw_parts_mut(FRAMEBUFFER.as_ptr() as *mut u16, WIDTH * HEIGHT) }
 }
 
 pub type RealDisplay = st7789::ST7789<
@@ -318,7 +319,7 @@ impl Display {
             .unwrap();
         lcd_vsync_pin.into_floating_input();
         let spi =
-            Spi::<_, _, 8>::new(spi_device).init(resets, 125.MHz(), 62_500_000u32.Hz(), &MODE_3);
+            Spi::<_, _, 8>::new(spi_device).init(resets, 125.MHz(), 62_500_000u32.Hz(), &MODE_0);
         let di = SPIInterface::new(spi, lcd_dc_pin, lcd_cs_pin);
         let mut st7789 = ST7789::new(di, None, Some(backlight_pin), WIDTH as u16, HEIGHT as u16);
         st7789.init(delay_source).unwrap();
@@ -339,6 +340,10 @@ impl Display {
                 .set_pixels(0, 0, (WIDTH - 1) as u16, (HEIGHT - 1) as u16, colors)
                 .unwrap();
         }
+        display
+            .st7789
+            .set_pixel(2, 2, Rgb565::BLUE.into_storage())
+            .unwrap();
         display.enable_backlight(delay_source);
         display
     }
@@ -360,9 +365,14 @@ impl Display {
     }
 
     pub fn flush(&mut self) {
+        defmt::info!("flush");
+        defmt::info!("wait for vsync");
         self.wait_for_vsync();
+        defmt::info!("start flush");
         self.start_flush();
+        defmt::info!("wait for flush");
         self.wait_for_flush();
+        defmt::info!("flush done");
     }
 
     pub fn draw(&mut self, func: impl FnOnce(&mut Self)) {
@@ -535,17 +545,22 @@ impl<'a> OriginDimensions for XorDisplay<'a> {
     }
 }
 
-const XOSC_CRYSTAL_FREQ: u32 = 12_000_000;
-
-#[cortex_m_rt::entry]
+#[rp_pico::entry]
 fn main() -> ! {
+    defmt::info!(
+        "Board {}, git revision {:x}, ROM verion {:x}",
+        hal::rom_data::copyright_string(),
+        hal::rom_data::git_revision(),
+        hal::rom_data::rom_version_number(),
+    );
+
     let mut pac = pac::Peripherals::take().unwrap();
     let core = pac::CorePeripherals::take().unwrap();
     let mut watchdog = hal::watchdog::Watchdog::new(pac.WATCHDOG);
 
     // The default is to generate a 125 MHz system clock
     let clocks = init_clocks_and_plls(
-        XOSC_CRYSTAL_FREQ,
+        rp_pico::XOSC_CRYSTAL_FREQ,
         pac.XOSC,
         pac.CLOCKS,
         pac.PLL_SYS,
@@ -570,9 +585,9 @@ fn main() -> ! {
     let mut green_led_pin = pins.gpio27.into_push_pull_output();
     let mut blue_led_pin = pins.gpio28.into_push_pull_output();
 
-    red_led_pin.set_low().unwrap();
-    green_led_pin.set_low().unwrap();
-    blue_led_pin.set_low().unwrap();
+    red_led_pin.set_high().unwrap();
+    green_led_pin.set_high().unwrap();
+    blue_led_pin.set_high().unwrap();
 
     let backlight_pin = pins.gpio20.into();
     let lcd_dc_pin = pins.gpio16.into();
@@ -594,8 +609,11 @@ fn main() -> ! {
         unsafe { dma::DmaChannel::new(dma::CHANNEL_FRAMEBUFFER) },
     );
     display.clear(Rgb565::BLUE).unwrap();
+    display.flush();
 
-    loop {}
+    loop {
+        cortex_m::asm::wfe();
+    }
 }
 
 // Copied and modified from rp2040_hal crate.
