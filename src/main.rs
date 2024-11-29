@@ -10,17 +10,14 @@ use embedded_graphics::{
 };
 use embedded_hal::digital::{InputPin, OutputPin};
 use fugit::RateExtU32;
-use rp2040_hal::clocks::{ClocksManager, InitError};
 use rp2040_hal::gpio::Pins;
 use rp2040_hal::gpio::{
     FunctionSioInput, FunctionSioOutput, FunctionSpi, Pin, PinId, PullDown, PullNone,
 };
 use rp2040_hal::pac;
-use rp2040_hal::pll::PLLConfig;
 use rp2040_hal::spi::Spi;
-use rp2040_hal::{self, Clock, Watchdog};
+use rp2040_hal::{self, Clock};
 
-use cortex_m::prelude::_embedded_hal_blocking_delay_DelayUs;
 use defmt_rtt as _;
 use embedded_hal::spi::SpiBus;
 use panic_probe as _;
@@ -262,7 +259,7 @@ pub const WIDTH: usize = 240;
 pub const HEIGHT: usize = 320;
 
 pub fn framebuffer() -> &'static mut [u16] {
-    static mut FRAMEBUFFER: [u16; WIDTH * HEIGHT] = [0; WIDTH * HEIGHT];
+    static mut FRAMEBUFFER: [u16; WIDTH * HEIGHT] = [0; WIDTH * HEIGHT]; // TODO: Use StaticCell
     unsafe { core::slice::from_raw_parts_mut(FRAMEBUFFER.as_ptr() as *mut u16, WIDTH * HEIGHT) }
 }
 
