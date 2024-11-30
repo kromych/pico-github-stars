@@ -271,11 +271,11 @@ where
             tx_count: WIDTH as u32 * HEIGHT as u32,
             tx_req: lax_dma::TxReq::Spi0Tx, // TODO: hardcoded
             byte_swap: true,
-            start: false,
+            start: true,
         };
 
         let dma: lax_dma::LaxDmaWrite<DMAY> = lax_dma::LaxDmaWrite::new(dma_config);
-        dma.trigger();
+        //dma.trigger();
         dma.wait();
 
         self.cs_pin.set_high().unwrap();
@@ -436,7 +436,7 @@ where
         };
 
         let dma: lax_dma::LaxDmaWrite<DMAX> = lax_dma::LaxDmaWrite::new(dma_config);
-        dma.trigger();
+        //dma.trigger();
         dma.wait();
         // defmt::info!("DMA done, first word: {:?}", unsafe { FRAMEBUFFER[0] });
         // defmt::info!("DMA done, last word: {:?}", unsafe {
