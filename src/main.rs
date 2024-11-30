@@ -45,10 +45,10 @@ mod lax_dma {
 
     #[allow(dead_code)]
     #[repr(u8)]
-    pub enum DmaWordSize {
-        U8 = 1,
-        U16 = 2,
-        U32 = 4,
+    pub enum TxSize {
+        _8Bit = 0,
+        _16bit = 1,
+        _32bit = 2,
     }
 
     #[allow(dead_code)]
@@ -112,7 +112,7 @@ mod lax_dma {
     }
 
     pub struct Config {
-        pub word_size: DmaWordSize,
+        pub word_size: TxSize,
         pub source: Source,
         pub destination: Destination,
         pub tx_count: u32,
@@ -138,7 +138,7 @@ mod lax_dma {
             core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
             ch.ch_al1_ctrl().write(|w| unsafe {
-                w.data_size().bits(config.word_size as u8 >> 1);
+                w.data_size().bits(config.word_size as u8);
                 w.incr_read().bit(src_incr);
                 w.incr_write().bit(dest_incr);
                 w.treq_sel().bits(config.tx_req as u8);
@@ -164,7 +164,7 @@ mod lax_dma {
             }
         }
 
-        pub fn start(&self) {
+        pub fn trigger(&self) {
             let channel_flags = 1 << CHID::id() | 1 << CHIDCHAIN::id();
             unsafe { &*rp2040_pac::DMA::ptr() }
                 .multi_chan_trigger()
@@ -175,11 +175,31 @@ mod lax_dma {
             !self.ch.ch_ctrl_trig().read().busy().bit_is_set()
         }
 
-        pub fn wait(self) {
+        pub fn wait(&self) {
             while !self.is_done() {}
 
             cortex_m::asm::dsb();
             core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        }
+
+        pub fn read_error(&self) -> bool {
+            self.ch.ch_al1_ctrl().read().read_error().bit_is_set()
+        }
+
+        pub fn last_read_addr(&self) -> u32 {
+            self.ch.ch_read_addr().read().bits()
+        }
+
+        pub fn write_error(&self) -> bool {
+            self.ch.ch_al1_ctrl().read().write_error().bit_is_set()
+        }
+
+        pub fn last_write_addr(&self) -> u32 {
+            self.ch.ch_write_addr().read().bits()
+        }
+
+        pub fn tx_count_remaining(&self) -> u32 {
+            self.ch.ch_trans_count().read().bits()
         }
     }
 }
@@ -400,7 +420,7 @@ where
         self.dc_pin.set_high().unwrap();
 
         let dma_config = lax_dma::Config {
-            word_size: lax_dma::DmaWordSize::U16,
+            word_size: lax_dma::TxSize::_16bit,
             source: lax_dma::Source {
                 address: unsafe { FRAMEBUFFER.as_ptr().cast() },
                 increment: true,
@@ -416,7 +436,7 @@ where
         };
 
         let dma: lax_dma::LaxDmaWrite<DMAY> = lax_dma::LaxDmaWrite::new(dma_config);
-        dma.start();
+        dma.trigger();
         dma.wait();
 
         self.cs_pin.set_high().unwrap();
@@ -561,7 +581,7 @@ where
         unsafe { SOURCE[0] = color.into_storage() };
 
         let dma_config = lax_dma::Config {
-            word_size: lax_dma::DmaWordSize::U16,
+            word_size: lax_dma::TxSize::_16bit,
             source: lax_dma::Source {
                 address: unsafe { SOURCE.as_ptr().cast() },
                 increment: false,
@@ -577,7 +597,7 @@ where
         };
 
         let dma: lax_dma::LaxDmaWrite<DMAX> = lax_dma::LaxDmaWrite::new(dma_config);
-        dma.start();
+        dma.trigger();
         dma.wait();
         defmt::info!("DMA done, first word: {:?}", unsafe { FRAMEBUFFER[0] });
         defmt::info!("DMA done, last word: {:?}", unsafe {
@@ -648,6 +668,8 @@ fn main() -> ! {
     backlight_pwm.channel_a.set_duty_cycle(0).unwrap();
 
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
+    run_dma_tests();
+
     let mut display = Display::new(
         backlight_pwm.channel_a,
         dc_pin,
@@ -663,11 +685,128 @@ fn main() -> ! {
         62_500.kHz(),
     );
     display.fill(Rgb565::GREEN.into_storage());
-    delay.delay_ms(1000);
-    display.clear(Rgb565::BLUE).unwrap();
+
+    //display.clear(Rgb565::BLUE).unwrap();
     //display.flush();
 
     loop {
         cortex_m::asm::wfe();
     }
+}
+
+// mod lax_dma_tests {
+//     use crate::lax_dma;
+
+//     pub fn dma_test<CHID>(
+//         dma_config: lax_dma::Config,
+//         src: &[u8; 4],
+//         dst: &mut [u8; 4],
+//         expected: &[u8; 4],
+//     ) where
+//         CHID: rp2040_hal::dma::ChannelIndex,
+//     {
+//         let src = cortex_m::singleton!(: [u8; 4] = src).unwrap();
+//         let dst = cortex_m::singleton!(: [u8; 4] = dst).unwrap();
+
+//         let dma: lax_dma::LaxDmaWrite<CHID> = lax_dma::LaxDmaWrite::new(dma_config);
+
+//         defmt::info!("DMA source addr: {:x}", src.as_ptr());
+//         defmt::info!("DMA dest addr: {:x}", dst.as_ptr());
+
+//         defmt::info!("src: {:?}", src);
+//         defmt::info!("dst: {:?}", dst);
+//         defmt::info!("DMA read error: {:?}", dma.read_error());
+//         defmt::info!("DMA write error: {:?}", dma.write_error());
+//         defmt::info!("DMA last read addr: {:x}", dma.last_read_addr());
+//         defmt::info!("DMA last write addr: {:x}", dma.last_write_addr());
+//         defmt::info!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
+
+//         defmt::info!("Starting DMA");
+//         dma.trigger();
+//         dma.wait();
+//         defmt::info!("DMA done");
+
+//         defmt::info!("src: {:?}", src);
+//         defmt::info!("dst: {:?}", dst);
+//         defmt::info!("DMA read error: {:?}", dma.read_error());
+//         defmt::info!("DMA write error: {:?}", dma.write_error());
+//         defmt::info!("DMA last read addr: {:x}", dma.last_read_addr());
+//         defmt::info!("DMA last write addr: {:x}", dma.last_write_addr());
+//         defmt::info!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
+
+//         if dst != expected {
+//             defmt::error!("Expected: {:?}, got: {:?}", expected, dst);
+//         }
+//     }
+
+//     pub fn dma_test_8bit() {
+//         let src = [42, 43, 44, 45];
+//         let mut dst = [0, 0, 0, 0];
+//         let expected = [42, 43, 44, 45];
+
+//         let dma_config = lax_dma::Config {
+//             word_size: lax_dma::TxSize::_8Bit,
+//             source: lax_dma::Source {
+//                 address: src.as_ptr(),
+//                 increment: true,
+//             },
+//             destination: lax_dma::Destination {
+//                 address: dst.as_mut_ptr(),
+//                 increment: true,
+//             },
+//             tx_count: dst.len() as u32,
+//             tx_req: lax_dma::TxReq::Permanent,
+//             byte_swap: false,
+//             start: false,
+//         };
+
+//         dma_test::<rp2040_hal::dma::CH0>(dma_config, &src, &mut dst, &expected);
+//     }
+// }
+
+fn run_dma_tests() {
+    let src = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
+    let dst = cortex_m::singleton!(: [u8; 4] = [0, 0, 0, 0]).unwrap();
+
+    let dma_config = lax_dma::Config {
+        word_size: lax_dma::TxSize::_8Bit,
+        source: lax_dma::Source {
+            address: src.as_ptr(),
+            increment: true,
+        },
+        destination: lax_dma::Destination {
+            address: dst.as_mut_ptr(),
+            increment: true,
+        },
+        tx_count: dst.len() as u32,
+        tx_req: lax_dma::TxReq::Permanent,
+        byte_swap: false,
+        start: false,
+    };
+
+    let dma: lax_dma::LaxDmaWrite<dma::CH5> = lax_dma::LaxDmaWrite::new(dma_config);
+
+    defmt::info!("DMA source addr: {:x}", src.as_ptr());
+    defmt::info!("DMA dest addr: {:x}", dst.as_ptr());
+
+    defmt::info!("src: {:?}", src);
+    defmt::info!("dst: {:?}", dst);
+    defmt::info!("DMA read error: {:?}", dma.read_error());
+    defmt::info!("DMA write error: {:?}", dma.write_error());
+    defmt::info!("DMA last read addr: {:x}", dma.last_read_addr());
+    defmt::info!("DMA last write addr: {:x}", dma.last_write_addr());
+    defmt::info!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
+
+    defmt::info!("Starting DMA");
+    dma.trigger();
+    dma.wait();
+    defmt::info!("DMA done");
+
+    defmt::info!("src: {:?}", src);
+    defmt::info!("dst: {:?}", dst);
+    defmt::info!("DMA read error: {:?}", dma.read_error());
+    defmt::info!("DMA write error: {:?}", dma.write_error());
+    defmt::info!("DMA last read addr: {:x}", dma.last_read_addr());
+    defmt::info!("DMA last write addr: {:x}", dma.last_write_addr());
+    defmt::info!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
 }
