@@ -7,7 +7,7 @@ use rp2040_hal::dma;
 #[derive(Copy, Clone)]
 #[repr(u8)]
 pub enum TxSize {
-    _8Bit = 0,
+    _8bit = 0,
     _16bit = 1,
     _32bit = 2,
 }
@@ -171,6 +171,7 @@ impl<CHID: dma::ChannelIndex, CHIDCHAIN: dma::ChannelIndex> LaxDmaWrite<CHID, CH
     }
 }
 
+#[allow(dead_code)]
 pub mod tests {
     use crate::lax_dma;
     use rp2040_hal::dma;
@@ -202,7 +203,7 @@ pub mod tests {
 
         // Calculate the transaction count based on the word size
         let tx_count = match word_size {
-            lax_dma::TxSize::_8Bit => dst.len() as u32,
+            lax_dma::TxSize::_8bit => dst.len() as u32,
             lax_dma::TxSize::_16bit => dst.len() as u32 / core::mem::size_of::<u16>() as u32,
             lax_dma::TxSize::_32bit => dst.len() as u32 / core::mem::size_of::<u32>() as u32,
         };
@@ -273,7 +274,7 @@ pub mod tests {
                 src: cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap(),
                 dst: cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap(),
                 expected: [42, 43, 44, 45],
-                word_size: lax_dma::TxSize::_8Bit,
+                word_size: lax_dma::TxSize::_8bit,
                 byte_swap: false,
                 increment_src: true,
                 increment_dst: true,
@@ -303,7 +304,7 @@ pub mod tests {
                 src: cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap(),
                 dst: cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap(),
                 expected: [42, 43, 44, 45],
-                word_size: lax_dma::TxSize::_8Bit,
+                word_size: lax_dma::TxSize::_8bit,
                 byte_swap: true,
                 increment_src: true,
                 increment_dst: true,
@@ -333,7 +334,7 @@ pub mod tests {
                 src: cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap(),
                 dst: cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap(),
                 expected: [42, 42, 42, 42],
-                word_size: lax_dma::TxSize::_8Bit,
+                word_size: lax_dma::TxSize::_8bit,
                 byte_swap: false,
                 increment_src: false,
                 increment_dst: true,
@@ -363,7 +364,7 @@ pub mod tests {
                 src: cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap(),
                 dst: cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap(),
                 expected: [45, 0, 0, 0],
-                word_size: lax_dma::TxSize::_8Bit,
+                word_size: lax_dma::TxSize::_8bit,
                 byte_swap: false,
                 increment_src: true,
                 increment_dst: false,

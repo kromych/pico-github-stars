@@ -23,6 +23,7 @@ use panic_probe as _;
 mod float;
 mod lax_dma;
 
+#[allow(dead_code)]
 mod time {
     pub fn time_us() -> u32 {
         unsafe { (*rp2040_pac::TIMER::PTR).timerawl().read().bits() }
@@ -251,6 +252,7 @@ where
     }
 
     pub fn flush(&mut self) {
+        self.set_address_window(0, 0, HEIGHT as u16 - 1, WIDTH as u16 - 1);
         self.write_command(Command::RAMWR);
 
         self.cs_pin.set_low().unwrap();
@@ -268,7 +270,7 @@ where
             },
             tx_count: WIDTH as u32 * HEIGHT as u32,
             tx_req: lax_dma::TxReq::Spi0Tx, // TODO: hardcoded
-            byte_swap: false,
+            byte_swap: true,
             start: false,
         };
 
@@ -278,7 +280,7 @@ where
 
         self.cs_pin.set_high().unwrap();
 
-        defmt::info!("flush done, time: {:x}", time::time_us());
+        //defmt::info!("flush done, time: {:x}", time::time_us());
     }
 
     pub fn set_backlight(&mut self, value: u8) {
@@ -429,17 +431,17 @@ where
             },
             tx_count: WIDTH as u32 * HEIGHT as u32,
             tx_req: lax_dma::TxReq::Permanent,
-            byte_swap: true,
+            byte_swap: false,
             start: true,
         };
 
         let dma: lax_dma::LaxDmaWrite<DMAX> = lax_dma::LaxDmaWrite::new(dma_config);
         dma.trigger();
         dma.wait();
-        defmt::info!("DMA done, first word: {:?}", unsafe { FRAMEBUFFER[0] });
-        defmt::info!("DMA done, last word: {:?}", unsafe {
-            FRAMEBUFFER[WIDTH * HEIGHT - 1]
-        });
+        // defmt::info!("DMA done, first word: {:?}", unsafe { FRAMEBUFFER[0] });
+        // defmt::info!("DMA done, last word: {:?}", unsafe {
+        //     FRAMEBUFFER[WIDTH * HEIGHT - 1]
+        // });
 
         Ok(())
     }
@@ -452,10 +454,11 @@ where
 #[rp_pico::entry]
 fn main() -> ! {
     defmt::info!(
-        "Board {}, git revision {:x}, ROM verion {:x}",
+        "Board {}, git revision {:x}, ROM verion {:x}, time {:x} us",
         rom_data::copyright_string(),
         rom_data::git_revision(),
         rom_data::rom_version_number(),
+        time::time_us64()
     );
 
     let mut pac = rp2040_pac::Peripherals::take().unwrap();
@@ -498,6 +501,7 @@ fn main() -> ! {
     let vsync_pin = pins.gpio21.into_floating_input();
 
     let dma = pac.DMA.split(&mut pac.RESETS);
+    //lax_dma::tests::run_dma_tests();
 
     let pwm_slices = pwm::Slices::new(pac.PWM, &mut pac.RESETS);
     let mut backlight_pwm = pwm_slices.pwm2;
@@ -507,8 +511,6 @@ fn main() -> ! {
     backlight_pwm.channel_a.set_duty_cycle(0).unwrap();
 
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
-    lax_dma::tests::run_dma_tests();
-
     let mut display = Display::new(
         backlight_pwm.channel_a,
         dc_pin,
@@ -523,12 +525,14 @@ fn main() -> ! {
         clocks.peripheral_clock.freq(),
         62_500.kHz(),
     );
+    display.set_backlight(40);
     display.fill(Rgb565::GREEN.into_storage());
 
-    //display.clear(Rgb565::BLUE).unwrap();
-    //display.flush();
+    display.clear(Rgb565::RED).unwrap();
+    display.flush();
 
     loop {
         cortex_m::asm::wfe();
+        defmt::info!("WFE time: {:x}", time::time_us64());
     }
 }
