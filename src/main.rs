@@ -37,10 +37,7 @@ mod time {
 pub const WIDTH: usize = 240;
 pub const HEIGHT: usize = 320;
 
-pub fn framebuffer() -> &'static mut [u16] {
-    static mut FRAMEBUFFER: [u16; WIDTH * HEIGHT] = [0; WIDTH * HEIGHT]; // TODO: Use StaticCell
-    unsafe { core::slice::from_raw_parts_mut(FRAMEBUFFER.as_ptr() as *mut u16, WIDTH * HEIGHT) }
-}
+static mut FRAMEBUFFER: [u16; WIDTH * HEIGHT] = [0; WIDTH * HEIGHT]; // TODO: Use StaticCell
 
 mod lax_dma {
     use core::marker::PhantomData;
@@ -405,7 +402,7 @@ where
         let dma_config = lax_dma::Config {
             word_size: lax_dma::DmaWordSize::U16,
             source: lax_dma::Source {
-                address: framebuffer().as_mut_ptr().cast(),
+                address: unsafe { FRAMEBUFFER.as_ptr().cast() },
                 increment: true,
             },
             destination: lax_dma::Destination {
@@ -508,12 +505,11 @@ where
     {
         const M: u32 = WIDTH as u32 - 1;
         const N: u32 = HEIGHT as u32 - 1;
-        let fb = framebuffer();
         for Pixel(coord, color) in pixels.into_iter() {
             if let Ok((x @ 0..=M, y @ 0..=N)) = coord.try_into() {
                 let index: u32 = x + y * WIDTH as u32;
                 let color = RawU16::from(color).into_inner();
-                fb[index as usize] = color.to_be();
+                unsafe { FRAMEBUFFER[index as usize] = color.to_be() };
             }
         }
         Ok(())
@@ -531,7 +527,6 @@ where
         let skip_top_left = clipped_area.top_left - area.top_left;
         let skip_bottom_right = area.bottom_right().unwrap() - clipped_area.bottom_right().unwrap();
 
-        let fb = framebuffer();
         let mut colors = colors.into_iter();
 
         for _ in 0..skip_top_left.y {
@@ -549,7 +544,7 @@ where
             for _ in 0..clipped_area.size.width {
                 let color = colors.next().unwrap_or(Rgb565::RED);
                 let color = RawU16::from(color).into_inner();
-                fb[index as usize] = color.to_be();
+                unsafe { FRAMEBUFFER[index as usize] = color.to_be() };
                 index += 1;
             }
 
@@ -572,7 +567,7 @@ where
                 increment: false,
             },
             destination: lax_dma::Destination {
-                address: framebuffer().as_mut_ptr().cast(),
+                address: unsafe { FRAMEBUFFER.as_mut_ptr().cast() },
                 increment: true,
             },
             tx_count: WIDTH as u32 * HEIGHT as u32,
@@ -584,11 +579,10 @@ where
         let dma: lax_dma::LaxDmaWrite<DMAX> = lax_dma::LaxDmaWrite::new(dma_config);
         dma.start();
         dma.wait();
-        defmt::info!("DMA done, first word: {:?}", framebuffer()[0]);
-        defmt::info!(
-            "DMA done, last word: {:?}",
-            framebuffer()[WIDTH * HEIGHT - 1]
-        );
+        defmt::info!("DMA done, first word: {:?}", unsafe { FRAMEBUFFER[0] });
+        defmt::info!("DMA done, last word: {:?}", unsafe {
+            FRAMEBUFFER[WIDTH * HEIGHT - 1]
+        });
 
         Ok(())
     }
