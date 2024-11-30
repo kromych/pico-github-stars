@@ -11,18 +11,13 @@ use embedded_graphics::{
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal::pwm::SetDutyCycle;
 use fugit::{HertzU32, RateExtU32};
-use rp2040_hal::gpio::{FunctionPwm, Pins};
-use rp2040_hal::gpio::{
-    FunctionSioInput, FunctionSioOutput, FunctionSpi, Pin, PinId, PullDown, PullNone,
-};
-use rp2040_hal::pac;
-use rp2040_hal::spi::Spi;
-use rp2040_hal::{self, Clock};
+use rp2040_hal::{dma, gpio, pwm, rom_data, spi, Clock};
+use spi::Spi;
 
+use core::marker::PhantomData;
 use defmt_rtt as _;
 use embedded_hal::spi::SpiBus;
 use panic_probe as _;
-use rp2040_pac::RESETS;
 
 mod float;
 
@@ -39,232 +34,157 @@ mod time {
     }
 }
 
-mod dma {
-    use rp2040_pac::dma::ch::ch_ctrl_trig::CH_CTRL_TRIG_SPEC as CtrlReg;
-    use rp2040_pac::dma::ch::ch_ctrl_trig::W as CtrlWriter;
-    use rp2040_pac::dma::CH;
-    use rp2040_pac::generic::W;
-
-    pub const CHANNEL_FRAMEBUFFER: usize = 0;
-    pub const CHANNEL_TILE0: usize = 1;
-    pub const CHANNEL_TILE1: usize = 2;
-
-    pub struct DmaChannel {
-        pub channel: usize,
-        pub ch: &'static CH,
-    }
-
-    impl DmaChannel {
-        pub unsafe fn new(channel: usize) -> Self {
-            DmaChannel {
-                channel,
-                ch: &(*rp2040_pac::DMA::PTR).ch(channel),
-            }
-        }
-
-        pub unsafe fn set_src(&mut self, src: u32) {
-            self.ch.ch_read_addr().write(|w| w.bits(src));
-        }
-
-        pub unsafe fn set_dst(&mut self, dst: u32) {
-            self.ch.ch_write_addr().write(|w| w.bits(dst));
-        }
-
-        pub unsafe fn set_count(&mut self, count: u32) {
-            self.ch.ch_trans_count().write(|w| w.bits(count));
-        }
-
-        pub unsafe fn set_ctrl_and_trigger<F>(&mut self, f: F)
-        where
-            F: FnOnce(&mut CtrlWriter) -> &mut W<CtrlReg>,
-        {
-            self.ch.ch_ctrl_trig().write(f);
-        }
-
-        pub fn wait(&self) {
-            while self.ch.ch_trans_count().read().bits() > 0 {}
-        }
-
-        pub fn get_src(&self) -> u32 {
-            self.ch.ch_read_addr().read().bits()
-        }
-
-        pub fn get_dst(&self) -> u32 {
-            self.ch.ch_write_addr().read().bits()
-        }
-
-        pub fn get_count(&self) -> u32 {
-            self.ch.ch_trans_count().read().bits()
-        }
-    }
-
-    fn wordsize(elem_size: u32) -> u32 {
-        match elem_size {
-            1 => 0,
-            2 => 1,
-            4 => 2,
-            _ => panic!("invalid DMA element size"),
-        }
-    }
-
-    pub unsafe fn start_set_mem(
-        dma_channel: &mut DmaChannel,
-        src: u32,
-        dst: u32,
-        elem_size: u32,
-        count: u32,
-    ) {
-        let channel = dma_channel.channel;
-        dma_channel.set_src(src);
-        dma_channel.set_dst(dst);
-        dma_channel.set_count(count);
-        dma_channel.set_ctrl_and_trigger(|w| {
-            w.treq_sel().permanent();
-            w.chain_to().bits(channel as u8);
-            w.incr_write().set_bit();
-            w.data_size().bits(wordsize(elem_size) as u8);
-            w.en().set_bit();
-            w
-        });
-    }
-
-    pub unsafe fn set_mem(
-        dma_channel: &mut DmaChannel,
-        src: u32,
-        dst: u32,
-        elem_size: u32,
-        count: u32,
-    ) {
-        start_set_mem(dma_channel, src, dst, elem_size, count);
-        dma_channel.wait();
-    }
-
-    pub unsafe fn start_copy_mem(
-        dma_channel: &mut DmaChannel,
-        src: u32,
-        dst: u32,
-        elem_size: u32,
-        count: u32,
-    ) {
-        let channel = dma_channel.channel;
-        dma_channel.set_src(src);
-        dma_channel.set_dst(dst);
-        dma_channel.set_count(count);
-        dma_channel.set_ctrl_and_trigger(|w| {
-            w.treq_sel().permanent();
-            w.chain_to().bits(channel as u8);
-            w.incr_write().set_bit();
-            w.incr_read().set_bit();
-            w.data_size().bits(wordsize(elem_size) as u8);
-            w.en().set_bit();
-            w
-        });
-    }
-
-    pub unsafe fn copy_mem(
-        dma_channel: &mut DmaChannel,
-        src: u32,
-        dst: u32,
-        elem_size: u32,
-        count: u32,
-    ) {
-        start_copy_mem(dma_channel, src, dst, elem_size, count);
-        dma_channel.wait();
-    }
-
-    pub unsafe fn start_copy_mem_bswap(
-        dma_channel: &mut DmaChannel,
-        src: u32,
-        dst: u32,
-        elem_size: u32,
-        count: u32,
-    ) {
-        let channel = dma_channel.channel;
-        dma_channel.set_src(src);
-        dma_channel.set_dst(dst);
-        dma_channel.set_count(count);
-        dma_channel.set_ctrl_and_trigger(|w| {
-            w.bswap().set_bit();
-            w.treq_sel().permanent();
-            w.chain_to().bits(channel as u8);
-            w.incr_write().set_bit();
-            w.incr_read().set_bit();
-            w.data_size().bits(wordsize(elem_size) as u8);
-            w.en().set_bit();
-            w
-        });
-    }
-
-    pub unsafe fn copy_mem_bswap(
-        dma_channel: &mut DmaChannel,
-        src: u32,
-        dst: u32,
-        elem_size: u32,
-        count: u32,
-    ) {
-        start_copy_mem_bswap(dma_channel, src, dst, elem_size, count);
-        dma_channel.wait();
-    }
-
-    pub unsafe fn copy_flash_to_mem(dma_channel: &mut DmaChannel, src: u32, dst: u32, count: u32) {
-        // Flush XIP FIFO.
-        let xip_ctrl = &*rp2040_pac::XIP_CTRL::PTR;
-        while xip_ctrl.stat().read().fifo_empty().bit_is_clear() {
-            defmt::info!("XIP FIFO not empty");
-            cortex_m::asm::nop();
-        }
-        xip_ctrl.stream_addr().write(|w| w.bits(src));
-        xip_ctrl.stream_ctr().write(|w| w.bits(count));
-
-        let channel = dma_channel.channel;
-        dma_channel.set_src(0x50400000); // XIP_AUX_BASE
-        dma_channel.set_dst(dst);
-        dma_channel.set_count(count);
-        dma_channel.set_ctrl_and_trigger(|w| {
-            w.treq_sel().bits(37); // DREQ_XIP_STREAM
-            w.chain_to().bits(channel as u8);
-            w.incr_write().set_bit();
-            w.data_size().bits(2); // 4 bytes
-            w.en().set_bit();
-            w
-        });
-        dma_channel.wait();
-
-        while xip_ctrl.stat().read().fifo_empty().bit_is_clear() {
-            defmt::info!("XIP FIFO not empty");
-            cortex_m::asm::nop();
-        }
-    }
-
-    pub(crate) unsafe fn start_copy_to_spi(
-        dma_channel: &mut DmaChannel,
-        src: u32,
-        dst: u32,
-        elem_size: u32,
-        count: u32,
-    ) {
-        defmt::info!("start_copy_to_spi");
-        let channel = dma_channel.channel;
-        dma_channel.set_src(src);
-        dma_channel.set_dst(dst);
-        dma_channel.set_count(count);
-        dma_channel.set_ctrl_and_trigger(|w| {
-            w.treq_sel().bits(16); // SPI0 TX
-            w.chain_to().bits(channel as u8);
-            w.incr_read().set_bit();
-            w.data_size().bits(wordsize(elem_size) as u8);
-            w.en().set_bit();
-            w
-        });
-    }
-}
-
 pub const WIDTH: usize = 240;
 pub const HEIGHT: usize = 320;
 
 pub fn framebuffer() -> &'static mut [u16] {
     static mut FRAMEBUFFER: [u16; WIDTH * HEIGHT] = [0; WIDTH * HEIGHT]; // TODO: Use StaticCell
     unsafe { core::slice::from_raw_parts_mut(FRAMEBUFFER.as_ptr() as *mut u16, WIDTH * HEIGHT) }
+}
+
+mod lax_dma {
+    use core::marker::PhantomData;
+    use rp2040_hal::dma;
+
+    #[allow(dead_code)]
+    #[repr(u8)]
+    pub enum DmaWordSize {
+        U8 = 1,
+        U16 = 2,
+        U32 = 4,
+    }
+
+    #[allow(dead_code)]
+    #[repr(u8)]
+    pub enum TxReq {
+        Pio0Tx0 = 0,
+        Pio0Tx1 = 1,
+        Pio0Tx2 = 2,
+        Pio0Tx3 = 3,
+        Pio0Rx0 = 4,
+        Pio0Rx1 = 5,
+        Pio0Rx2 = 6,
+        Pio0Rx3 = 7,
+        Pio1Tx0 = 8,
+        Pio1Tx1 = 9,
+        Pio1Tx2 = 10,
+        Pio1Tx3 = 11,
+        Pio1Rx0 = 12,
+        Pio1Rx1 = 13,
+        Pio1Rx2 = 14,
+        Pio1Rx3 = 15,
+        Spi0Tx = 16,
+        Spi0Rx = 17,
+        Spi1Tx = 18,
+        Spi1Rx = 19,
+        Uart0Tx = 20,
+        Uart0Rx = 21,
+        Uart1Tx = 22,
+        Uart1Rx = 23,
+        PwmWrap0 = 24,
+        PwmWrap1 = 25,
+        PwmWrap2 = 26,
+        PwmWrap3 = 27,
+        PwmWrap4 = 28,
+        PwmWrap5 = 29,
+        PwmWrap6 = 30,
+        PwmWrap7 = 31,
+        I2C0Tx = 32,
+        I2C0Rx = 33,
+        I2C1Tx = 34,
+        I2C1Rx = 35,
+        Adc = 36,
+        XipStream = 37,
+        XipSsitx = 38,
+        XipSsirx = 39,
+        Timer0 = 59,
+        Timer1 = 60,
+        Timer2 = 61,
+        Timer3 = 62,
+        Permanent = 63,
+    }
+
+    pub struct Source {
+        pub address: *const u8,
+        pub increment: bool,
+    }
+
+    pub struct Destination {
+        pub address: *mut u8,
+        pub increment: bool,
+    }
+
+    pub struct Config {
+        pub word_size: DmaWordSize,
+        pub source: Source,
+        pub destination: Destination,
+        pub tx_count: u32,
+        pub tx_req: TxReq,
+        pub byte_swap: bool,
+        pub start: bool,
+    }
+
+    pub struct LaxDmaWrite<CHID: dma::ChannelIndex, CHIDCHAIN: dma::ChannelIndex = CHID> {
+        _ch_id: PhantomData<CHID>,
+        _ch_id_chain: PhantomData<CHIDCHAIN>,
+        ch: &'static rp2040_pac::dma::ch::CH,
+    }
+
+    impl<CHID: dma::ChannelIndex, CHIDCHAIN: dma::ChannelIndex> LaxDmaWrite<CHID, CHIDCHAIN> {
+        pub fn new(config: Config) -> Self {
+            let ch = unsafe { (*rp2040_pac::DMA::PTR).ch(CHID::id() as usize) };
+
+            let (src, src_incr) = (config.source.address, config.source.increment);
+            let (dest, dest_incr) = (config.destination.address, config.destination.increment);
+
+            cortex_m::asm::dsb();
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+
+            ch.ch_al1_ctrl().write(|w| unsafe {
+                w.data_size().bits(config.word_size as u8 >> 1);
+                w.incr_read().bit(src_incr);
+                w.incr_write().bit(dest_incr);
+                w.treq_sel().bits(config.tx_req as u8);
+                w.bswap().bit(config.byte_swap);
+                w.chain_to().bits(CHIDCHAIN::id());
+                w.en().bit(true);
+                w
+            });
+            ch.ch_read_addr().write(|w| unsafe { w.bits(src as u32) });
+            ch.ch_trans_count()
+                .write(|w| unsafe { w.bits(config.tx_count) });
+            if config.start {
+                ch.ch_al2_write_addr_trig()
+                    .write(|w| unsafe { w.bits(dest as u32) });
+            } else {
+                ch.ch_write_addr().write(|w| unsafe { w.bits(dest as u32) });
+            }
+
+            Self {
+                _ch_id: PhantomData,
+                _ch_id_chain: PhantomData,
+                ch,
+            }
+        }
+
+        pub fn start(&self) {
+            let channel_flags = 1 << CHID::id() | 1 << CHIDCHAIN::id();
+            unsafe { &*rp2040_pac::DMA::ptr() }
+                .multi_chan_trigger()
+                .write(|w| unsafe { w.bits(channel_flags) });
+        }
+
+        pub fn is_done(&self) -> bool {
+            !self.ch.ch_ctrl_trig().read().busy().bit_is_set()
+        }
+
+        pub fn wait(self) {
+            while !self.is_done() {}
+
+            cortex_m::asm::dsb();
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        }
+    }
 }
 
 #[allow(clippy::upper_case_acronyms, dead_code)]
@@ -312,57 +232,64 @@ enum Command {
     GMCTRN1 = 0xE1,
 }
 
-pub struct Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN>
+pub struct Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>
 where
-    DC: PinId,
-    CS: PinId,
-    VSYNC: PinId,
-    SPIDEV: rp2040_hal::spi::SpiDevice,
-    SPIPINOUT: rp2040_hal::spi::ValidSpiPinout<SPIDEV>,
-    PWMSLICE: rp2040_hal::pwm::AnySlice,
-    PWMCHAN: rp2040_hal::pwm::ChannelId,
-    rp2040_hal::pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
+    DC: gpio::PinId,
+    CS: gpio::PinId,
+    VSYNC: gpio::PinId,
+    SPIDEV: spi::SpiDevice,
+    SPIPINOUT: spi::ValidSpiPinout<SPIDEV>,
+    PWMSLICE: pwm::AnySlice,
+    PWMCHAN: pwm::ChannelId,
+    DMAX: dma::ChannelIndex,
+    DMAY: dma::ChannelIndex,
+    pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
 {
-    backlight_pwm: rp2040_hal::pwm::Channel<PWMSLICE, PWMCHAN>,
-    dc_pin: Pin<DC, FunctionSioOutput, PullDown>,
-    cs_pin: Pin<CS, FunctionSioOutput, PullDown>,
-    vsync_pin: Pin<VSYNC, FunctionSioInput, PullNone>,
-    spi_device: Spi<rp2040_hal::spi::Enabled, SPIDEV, SPIPINOUT, 8>,
-    dma_channel: dma::DmaChannel,
+    backlight_pwm: pwm::Channel<PWMSLICE, PWMCHAN>,
+    dc_pin: gpio::Pin<DC, gpio::FunctionSioOutput, gpio::PullDown>,
+    cs_pin: gpio::Pin<CS, gpio::FunctionSioOutput, gpio::PullDown>,
+    vsync_pin: gpio::Pin<VSYNC, gpio::FunctionSioInput, gpio::PullNone>,
+    spi_device: Spi<spi::Enabled, SPIDEV, SPIPINOUT, 8>,
+    dma_channel_x: PhantomData<DMAX>,
+    dma_channel_y: PhantomData<DMAY>,
+    sspdr: *mut u32,
     last_vsync_time: u32,
 }
 
 impl<
-        DC: PinId,
-        CS: PinId,
-        VSYNC: PinId,
-        SPIDEV: rp2040_hal::spi::SpiDevice,
-        SPIPINOUT: rp2040_hal::spi::ValidSpiPinout<SPIDEV>,
-        PWMSLICE: rp2040_hal::pwm::AnySlice,
-        PWMCHAN: rp2040_hal::pwm::ChannelId,
-    > Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN>
+        DC: gpio::PinId,
+        CS: gpio::PinId,
+        VSYNC: gpio::PinId,
+        SPIDEV: spi::SpiDevice,
+        SPIPINOUT: spi::ValidSpiPinout<SPIDEV>,
+        PWMSLICE: pwm::AnySlice,
+        PWMCHAN: pwm::ChannelId,
+        DMAX: dma::ChannelIndex,
+        DMAY: dma::ChannelIndex,
+    > Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>
 where
-    rp2040_hal::pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
+    pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new<F, B>(
-        backlight_pwm: rp2040_hal::pwm::Channel<PWMSLICE, PWMCHAN>,
-        dc_pin: Pin<DC, FunctionSioOutput, PullDown>,
-        cs_pin: Pin<CS, FunctionSioOutput, PullDown>,
-        vsync_pin: Pin<VSYNC, FunctionSioInput, PullNone>,
+        backlight_pwm: pwm::Channel<PWMSLICE, PWMCHAN>,
+        dc_pin: gpio::Pin<DC, gpio::FunctionSioOutput, gpio::PullDown>,
+        cs_pin: gpio::Pin<CS, gpio::FunctionSioOutput, gpio::PullDown>,
+        vsync_pin: gpio::Pin<VSYNC, gpio::FunctionSioInput, gpio::PullNone>,
         spi_device: SPIDEV,
         spi_pinout: SPIPINOUT,
+        _dma_channel_x: DMAX,
+        _dma_channel_y: DMAY,
         delay_source: &mut cortex_m::delay::Delay,
-        resets: &mut RESETS,
+        resets: &mut rp2040_pac::RESETS,
         peri_frequency: F,
         baudrate: B,
-        dma_channel: dma::DmaChannel,
     ) -> Self
     where
         F: Into<HertzU32>,
         B: Into<HertzU32>,
     {
-        //let sspdr = spi_device.sspdr(); // For DMA
+        let sspdr = spi_device.sspdr().as_ptr(); // For DMA
         let spi_device = Spi::<_, _, _, 8>::new(spi_device, spi_pinout);
         let spi_device = spi_device.init(
             resets,
@@ -376,7 +303,9 @@ where
             cs_pin,
             vsync_pin,
             spi_device,
-            dma_channel,
+            sspdr,
+            dma_channel_x: PhantomData,
+            dma_channel_y: PhantomData,
             last_vsync_time: 0,
         };
 
@@ -467,38 +396,35 @@ where
         }
     }
 
-    fn start_flush(&mut self) {
-        unsafe {
-            dma::start_copy_to_spi(
-                &mut self.dma_channel,
-                framebuffer().as_ptr() as u32,
-                (*pac::SPI0::PTR).sspdr().as_ptr() as u32, // TODO: SPI0 TX FIFO, hardcoded for now
-                1,
-                (WIDTH * HEIGHT * 2) as u32,
-            );
-        }
-    }
-
-    fn wait_for_flush(&mut self) {
-        self.dma_channel.wait();
-    }
-
     pub fn flush(&mut self) {
-        defmt::info!("flush");
-        defmt::info!("wait for vsync");
-        self.wait_for_vsync();
-        defmt::info!("start flush");
-        self.start_flush();
-        defmt::info!("wait for flush");
-        self.wait_for_flush();
-        defmt::info!("flush done");
-    }
+        self.write_command(Command::RAMWR);
 
-    pub fn draw(&mut self, func: impl FnOnce(&mut Self)) {
-        self.wait_for_flush();
-        func(self);
-        self.wait_for_vsync();
-        self.start_flush();
+        self.cs_pin.set_low().unwrap();
+        self.dc_pin.set_high().unwrap();
+
+        let dma_config = lax_dma::Config {
+            word_size: lax_dma::DmaWordSize::U16,
+            source: lax_dma::Source {
+                address: framebuffer().as_mut_ptr().cast(),
+                increment: true,
+            },
+            destination: lax_dma::Destination {
+                address: self.sspdr.cast(),
+                increment: false,
+            },
+            tx_count: WIDTH as u32 * HEIGHT as u32,
+            tx_req: lax_dma::TxReq::Spi0Tx, // TODO: hardcoded
+            byte_swap: false,
+            start: false,
+        };
+
+        let dma: lax_dma::LaxDmaWrite<DMAY> = lax_dma::LaxDmaWrite::new(dma_config);
+        dma.start();
+        dma.wait();
+
+        self.cs_pin.set_high().unwrap();
+
+        defmt::info!("flush done, time: {:x}", time::time_us());
     }
 
     pub fn set_backlight(&mut self, value: u8) {
@@ -536,24 +462,23 @@ where
     }
 
     pub fn flush_progress(&self) -> usize {
-        if self.dma_channel.get_count() == 0 {
-            return WIDTH * HEIGHT;
-        }
-        (self.dma_channel.get_src() as usize - framebuffer().as_ptr() as usize) / 2
+        0
     }
 }
 
 impl<
-        DC: PinId,
-        CS: PinId,
-        VSYNC: PinId,
-        SPIDEV: rp2040_hal::spi::SpiDevice,
-        SPIPINOUT: rp2040_hal::spi::ValidSpiPinout<SPIDEV>,
-        PWMSLICE: rp2040_hal::pwm::AnySlice,
-        PWMCHAN: rp2040_hal::pwm::ChannelId,
-    > OriginDimensions for Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN>
+        DC: gpio::PinId,
+        CS: gpio::PinId,
+        VSYNC: gpio::PinId,
+        SPIDEV: spi::SpiDevice,
+        SPIPINOUT: spi::ValidSpiPinout<SPIDEV>,
+        PWMSLICE: pwm::AnySlice,
+        PWMCHAN: pwm::ChannelId,
+        DMAX: dma::ChannelIndex,
+        DMAY: dma::ChannelIndex,
+    > OriginDimensions for Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>
 where
-    rp2040_hal::pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
+    pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
 {
     fn size(&self) -> Size {
         Size::new(WIDTH as u32, HEIGHT as u32)
@@ -561,16 +486,18 @@ where
 }
 
 impl<
-        DC: PinId,
-        CS: PinId,
-        VSYNC: PinId,
-        SPIDEV: rp2040_hal::spi::SpiDevice,
-        SPIPINOUT: rp2040_hal::spi::ValidSpiPinout<SPIDEV>,
-        PWMSLICE: rp2040_hal::pwm::AnySlice,
-        PWMCHAN: rp2040_hal::pwm::ChannelId,
-    > DrawTarget for Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN>
+        DC: gpio::PinId,
+        CS: gpio::PinId,
+        VSYNC: gpio::PinId,
+        SPIDEV: spi::SpiDevice,
+        SPIPINOUT: spi::ValidSpiPinout<SPIDEV>,
+        PWMSLICE: pwm::AnySlice,
+        PWMCHAN: pwm::ChannelId,
+        DMAX: dma::ChannelIndex,
+        DMAY: dma::ChannelIndex,
+    > DrawTarget for Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>
 where
-    rp2040_hal::pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
+    pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
 {
     type Color = Rgb565;
     type Error = core::convert::Infallible;
@@ -635,23 +562,34 @@ where
     }
 
     fn clear(&mut self, color: Self::Color) -> Result<(), Self::Error> {
-        let color = RawU16::from(color).into_inner().to_be();
-        unsafe {
-            dma::set_mem(
-                &mut self.dma_channel,
-                &color as *const u16 as u32,
-                framebuffer().as_ptr() as u32,
-                2,
-                (WIDTH * HEIGHT) as u32,
-            );
-        }
-        if framebuffer()[0] != color {
-            defmt::info!(
-                "incorrect framebuffer[0], expected {} got {}",
-                color,
-                framebuffer()[0]
-            );
-        }
+        static mut SOURCE: [u16; 1] = [0];
+        unsafe { SOURCE[0] = color.into_storage() };
+
+        let dma_config = lax_dma::Config {
+            word_size: lax_dma::DmaWordSize::U16,
+            source: lax_dma::Source {
+                address: unsafe { SOURCE.as_ptr().cast() },
+                increment: false,
+            },
+            destination: lax_dma::Destination {
+                address: framebuffer().as_mut_ptr().cast(),
+                increment: true,
+            },
+            tx_count: WIDTH as u32 * HEIGHT as u32,
+            tx_req: lax_dma::TxReq::Permanent,
+            byte_swap: true,
+            start: true,
+        };
+
+        let dma: lax_dma::LaxDmaWrite<DMAX> = lax_dma::LaxDmaWrite::new(dma_config);
+        dma.start();
+        dma.wait();
+        defmt::info!("DMA done, first word: {:?}", framebuffer()[0]);
+        defmt::info!(
+            "DMA done, last word: {:?}",
+            framebuffer()[WIDTH * HEIGHT - 1]
+        );
+
         Ok(())
     }
 
@@ -664,13 +602,13 @@ where
 fn main() -> ! {
     defmt::info!(
         "Board {}, git revision {:x}, ROM verion {:x}",
-        rp2040_hal::rom_data::copyright_string(),
-        rp2040_hal::rom_data::git_revision(),
-        rp2040_hal::rom_data::rom_version_number(),
+        rom_data::copyright_string(),
+        rom_data::git_revision(),
+        rom_data::rom_version_number(),
     );
 
-    let mut pac = pac::Peripherals::take().unwrap();
-    let core = pac::CorePeripherals::take().unwrap();
+    let mut pac = rp2040_pac::Peripherals::take().unwrap();
+    let core = rp2040_pac::CorePeripherals::take().unwrap();
     let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
 
     let clocks = rp2040_hal::clocks::init_clocks_and_plls(
@@ -686,7 +624,7 @@ fn main() -> ! {
     .unwrap();
 
     let sio = rp2040_hal::sio::Sio::new(pac.SIO);
-    let pins = Pins::new(
+    let pins = gpio::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
         sio.gpio_bank0,
@@ -701,14 +639,14 @@ fn main() -> ! {
     green_led_pin.set_high().unwrap();
     blue_led_pin.set_high().unwrap();
 
-    let backlight_pin = pins.gpio20.into_function::<FunctionPwm>();
+    let backlight_pin = pins.gpio20.into_function::<gpio::FunctionPwm>();
     let dc_pin = pins.gpio16.into_push_pull_output();
     let cs_pin = pins.gpio17.into_push_pull_output();
-    let sck_pin = pins.gpio18.into_function::<FunctionSpi>();
-    let mosi_pin = pins.gpio19.into_function::<FunctionSpi>();
+    let sck_pin = pins.gpio18.into_function::<gpio::FunctionSpi>();
+    let mosi_pin = pins.gpio19.into_function::<gpio::FunctionSpi>();
     let vsync_pin = pins.gpio21.into_floating_input();
 
-    let pwm_slices = rp2040_hal::pwm::Slices::new(pac.PWM, &mut pac.RESETS);
+    let pwm_slices = pwm::Slices::new(pac.PWM, &mut pac.RESETS);
     let mut backlight_pwm = pwm_slices.pwm2;
     backlight_pwm.set_ph_correct();
     backlight_pwm.enable();
@@ -723,16 +661,17 @@ fn main() -> ! {
         vsync_pin,
         pac.SPI0,
         (mosi_pin, sck_pin),
+        dma::CH0,
+        dma::CH1,
         &mut delay,
         &mut pac.RESETS,
         clocks.peripheral_clock.freq(),
         62_500.kHz(),
-        unsafe { dma::DmaChannel::new(dma::CHANNEL_FRAMEBUFFER) },
     );
     display.fill(Rgb565::GREEN.into_storage());
     delay.delay_ms(1000);
     display.clear(Rgb565::BLUE).unwrap();
-    display.flush();
+    //display.flush();
 
     loop {
         cortex_m::asm::wfe();
