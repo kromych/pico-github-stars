@@ -167,52 +167,48 @@ pub mod tests {
     use crate::lax_dma;
     use rp2040_hal::dma;
 
-    macro_rules! function {
-        () => {{
-            fn f() {}
-            fn type_name_of<T>(_: T) -> &'static str {
-                core::any::type_name::<T>()
-            }
-            let name = type_name_of(f);
-            name.strip_suffix("::f").unwrap()
-        }};
-    }
+    fn run_dma_test(
+        src: &'static mut [u8; 4],
+        dst: &'static mut [u8; 4],
+        expected: [u8; 4],
+        word_size: lax_dma::TxSize,
+        byte_swap: bool,
+        increment_src: bool,
+        increment_dst: bool,
+        test_name: &'static str,
+    ) {
+        defmt::info!("*** Running DMA test {}", test_name);
 
-    fn dma_test_8bit(src_bytes: [u8; 4], expected: [u8; 4]) {
-        defmt::info!("*** Running DMA test {}", function!());
-
-        let src = cortex_m::singleton!(: [u8; 4] = src_bytes).unwrap();
-        let dst = cortex_m::singleton!(: [u8; 4] = [0, 0, 0, 0]).unwrap();
+        let tx_count = match word_size {
+            lax_dma::TxSize::_8Bit => dst.len() as u32,
+            lax_dma::TxSize::_16bit => dst.len() as u32 / core::mem::size_of::<u16>() as u32,
+            lax_dma::TxSize::_32bit => dst.len() as u32 / core::mem::size_of::<u32>() as u32,
+        };
 
         let dma_config = lax_dma::Config {
-            word_size: lax_dma::TxSize::_8Bit,
+            word_size,
             source: lax_dma::Source {
                 address: src.as_ptr(),
-                increment: true,
+                increment: increment_src,
             },
             destination: lax_dma::Destination {
                 address: dst.as_mut_ptr(),
-                increment: true,
+                increment: increment_dst,
             },
-            tx_count: dst.len() as u32,
+            tx_count,
             tx_req: lax_dma::TxReq::Permanent,
-            byte_swap: false,
+            byte_swap,
             start: false,
         };
 
         let dma: lax_dma::LaxDmaWrite<dma::CH5> = lax_dma::LaxDmaWrite::new(dma_config);
 
-        defmt::debug!("DMA source addr: {:x}", src.as_ptr());
-        defmt::debug!("DMA dest addr: {:x}", dst.as_ptr());
-
+        defmt::debug!("DMA source addr: {:x}", src.as_ptr() as usize);
+        defmt::debug!("DMA dest addr: {:x}", dst.as_ptr() as usize);
         defmt::debug!("src: {:?}", src);
         defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
 
+        // Start the DMA transfer
         defmt::debug!("Starting DMA");
         dma.trigger();
         dma.wait();
@@ -220,6 +216,7 @@ pub mod tests {
 
         defmt::debug!("src: {:?}", src);
         defmt::debug!("dst: {:?}", dst);
+
         defmt::debug!("DMA read error: {:?}", dma.read_error());
         defmt::debug!("DMA write error: {:?}", dma.write_error());
         defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
@@ -229,534 +226,14 @@ pub mod tests {
         if dst != &expected {
             defmt::error!(
                 "!!! {} failed! Expected: {:?}, got: {:?}",
-                function!(),
+                test_name,
                 expected,
                 dst
             );
         } else {
             defmt::info!(
                 "*** {} passed. Expected: {:?}, got: {:?}",
-                function!(),
-                expected,
-                dst
-            );
-        }
-    }
-
-    fn dma_test_16bit(src_bytes: [u8; 4], expected: [u8; 4]) {
-        defmt::info!("*** Running DMA test {}", function!());
-
-        let src = cortex_m::singleton!(: [u8; 4] = src_bytes).unwrap();
-        let dst = cortex_m::singleton!(: [u8; 4] = [0, 0, 0, 0]).unwrap();
-
-        let dma_config = lax_dma::Config {
-            word_size: lax_dma::TxSize::_16bit,
-            source: lax_dma::Source {
-                address: src.as_ptr(),
-                increment: true,
-            },
-            destination: lax_dma::Destination {
-                address: dst.as_mut_ptr(),
-                increment: true,
-            },
-            tx_count: dst.len() as u32 / core::mem::size_of::<u16>() as u32,
-            tx_req: lax_dma::TxReq::Permanent,
-            byte_swap: false,
-            start: false,
-        };
-
-        let dma: lax_dma::LaxDmaWrite<dma::CH5> = lax_dma::LaxDmaWrite::new(dma_config);
-
-        defmt::debug!("DMA source addr: {:x}", src.as_ptr());
-        defmt::debug!("DMA dest addr: {:x}", dst.as_ptr());
-
-        defmt::debug!("src: {:?}", src);
-        defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
-
-        defmt::debug!("Starting DMA");
-        dma.trigger();
-        dma.wait();
-        defmt::debug!("DMA done");
-
-        defmt::debug!("src: {:?}", src);
-        defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
-
-        if dst != &expected {
-            defmt::error!(
-                "!!! {} failed! Expected: {:?}, got: {:?}",
-                function!(),
-                expected,
-                dst
-            );
-        } else {
-            defmt::info!(
-                "*** {} passed. Expected: {:?}, got: {:?}",
-                function!(),
-                expected,
-                dst
-            );
-        }
-    }
-
-    fn dma_test_32bit(src_bytes: [u8; 4], expected: [u8; 4]) {
-        defmt::info!("*** Running DMA test {}", function!());
-
-        let src = cortex_m::singleton!(: [u8; 4] = src_bytes).unwrap();
-        let dst = cortex_m::singleton!(: [u8; 4] = [0, 0, 0, 0]).unwrap();
-
-        let dma_config = lax_dma::Config {
-            word_size: lax_dma::TxSize::_32bit,
-            source: lax_dma::Source {
-                address: src.as_ptr(),
-                increment: true,
-            },
-            destination: lax_dma::Destination {
-                address: dst.as_mut_ptr(),
-                increment: true,
-            },
-            tx_count: dst.len() as u32 / core::mem::size_of::<u32>() as u32,
-            tx_req: lax_dma::TxReq::Permanent,
-            byte_swap: false,
-            start: false,
-        };
-
-        let dma: lax_dma::LaxDmaWrite<dma::CH5> = lax_dma::LaxDmaWrite::new(dma_config);
-
-        defmt::debug!("DMA source addr: {:x}", src.as_ptr());
-        defmt::debug!("DMA dest addr: {:x}", dst.as_ptr());
-
-        defmt::debug!("src: {:?}", src);
-        defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
-
-        defmt::debug!("Starting DMA");
-        dma.trigger();
-        dma.wait();
-        defmt::debug!("DMA done");
-
-        defmt::debug!("src: {:?}", src);
-        defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
-
-        if dst != &expected {
-            defmt::error!(
-                "!!! {} failed! Expected: {:?}, got: {:?}",
-                function!(),
-                expected,
-                dst
-            );
-        } else {
-            defmt::info!(
-                "*** {} passed. Expected: {:?}, got: {:?}",
-                function!(),
-                expected,
-                dst
-            );
-        }
-    }
-
-    fn dma_test_8bit_byte_swap(src_bytes: [u8; 4], expected: [u8; 4]) {
-        defmt::info!("*** Running DMA test {}", function!());
-
-        let src = cortex_m::singleton!(: [u8; 4] = src_bytes).unwrap();
-        let dst = cortex_m::singleton!(: [u8; 4] = [0, 0, 0, 0]).unwrap();
-
-        let dma_config = lax_dma::Config {
-            word_size: lax_dma::TxSize::_8Bit,
-            source: lax_dma::Source {
-                address: src.as_ptr(),
-                increment: true,
-            },
-            destination: lax_dma::Destination {
-                address: dst.as_mut_ptr(),
-                increment: true,
-            },
-            tx_count: dst.len() as u32,
-            tx_req: lax_dma::TxReq::Permanent,
-            byte_swap: true,
-            start: false,
-        };
-
-        let dma: lax_dma::LaxDmaWrite<dma::CH5> = lax_dma::LaxDmaWrite::new(dma_config);
-
-        defmt::debug!("DMA source addr: {:x}", src.as_ptr());
-        defmt::debug!("DMA dest addr: {:x}", dst.as_ptr());
-
-        defmt::debug!("src: {:?}", src);
-        defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
-
-        defmt::debug!("Starting DMA");
-        dma.trigger();
-        dma.wait();
-        defmt::debug!("DMA done");
-
-        defmt::debug!("src: {:?}", src);
-        defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
-
-        if dst != &expected {
-            defmt::error!(
-                "!!! {} failed! Expected: {:?}, got: {:?}",
-                function!(),
-                expected,
-                dst
-            );
-        } else {
-            defmt::info!(
-                "*** {} passed. Expected: {:?}, got: {:?}",
-                function!(),
-                expected,
-                dst
-            );
-        }
-    }
-
-    fn dma_test_16bit_byte_swap(src_bytes: [u8; 4], expected: [u8; 4]) {
-        defmt::info!("*** Running DMA test {}", function!());
-
-        let src = cortex_m::singleton!(: [u8; 4] = src_bytes).unwrap();
-        let dst = cortex_m::singleton!(: [u8; 4] = [0, 0, 0, 0]).unwrap();
-
-        let dma_config = lax_dma::Config {
-            word_size: lax_dma::TxSize::_16bit,
-            source: lax_dma::Source {
-                address: src.as_ptr(),
-                increment: true,
-            },
-            destination: lax_dma::Destination {
-                address: dst.as_mut_ptr(),
-                increment: true,
-            },
-            tx_count: dst.len() as u32 / core::mem::size_of::<u16>() as u32,
-            tx_req: lax_dma::TxReq::Permanent,
-            byte_swap: true,
-            start: false,
-        };
-
-        let dma: lax_dma::LaxDmaWrite<dma::CH5> = lax_dma::LaxDmaWrite::new(dma_config);
-
-        defmt::debug!("DMA source addr: {:x}", src.as_ptr());
-        defmt::debug!("DMA dest addr: {:x}", dst.as_ptr());
-
-        defmt::debug!("src: {:?}", src);
-        defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
-
-        defmt::debug!("Starting DMA");
-        dma.trigger();
-        dma.wait();
-        defmt::debug!("DMA done");
-
-        defmt::debug!("src: {:?}", src);
-        defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
-
-        if dst != &expected {
-            defmt::error!(
-                "!!! {} failed! Expected: {:?}, got: {:?}",
-                function!(),
-                expected,
-                dst
-            );
-        } else {
-            defmt::info!(
-                "*** {} passed. Expected: {:?}, got: {:?}",
-                function!(),
-                expected,
-                dst
-            );
-        }
-    }
-
-    fn dma_test_32bit_byte_swap(src_bytes: [u8; 4], expected: [u8; 4]) {
-        defmt::info!("*** Running DMA test {}", function!());
-
-        let src = cortex_m::singleton!(: [u8; 4] = src_bytes).unwrap();
-        let dst = cortex_m::singleton!(: [u8; 4] = [0, 0, 0, 0]).unwrap();
-
-        let dma_config = lax_dma::Config {
-            word_size: lax_dma::TxSize::_32bit,
-            source: lax_dma::Source {
-                address: src.as_ptr(),
-                increment: true,
-            },
-            destination: lax_dma::Destination {
-                address: dst.as_mut_ptr(),
-                increment: true,
-            },
-            tx_count: dst.len() as u32 / core::mem::size_of::<u32>() as u32,
-            tx_req: lax_dma::TxReq::Permanent,
-            byte_swap: true,
-            start: false,
-        };
-
-        let dma: lax_dma::LaxDmaWrite<dma::CH5> = lax_dma::LaxDmaWrite::new(dma_config);
-
-        defmt::debug!("DMA source addr: {:x}", src.as_ptr());
-        defmt::debug!("DMA dest addr: {:x}", dst.as_ptr());
-
-        defmt::debug!("src: {:?}", src);
-        defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
-
-        defmt::debug!("Starting DMA");
-        dma.trigger();
-        dma.wait();
-        defmt::debug!("DMA done");
-
-        defmt::debug!("src: {:?}", src);
-        defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
-
-        if dst != &expected {
-            defmt::error!(
-                "!!! {} failed! Expected: {:?}, got: {:?}",
-                function!(),
-                expected,
-                dst
-            );
-        } else {
-            defmt::info!(
-                "*** {} passed. Expected: {:?}, got: {:?}",
-                function!(),
-                expected,
-                dst
-            );
-        }
-    }
-
-    fn dma_test_8bit_fill(src_bytes: [u8; 4], expected: [u8; 4]) {
-        defmt::info!("*** Running DMA test {}", function!());
-
-        let src = cortex_m::singleton!(: [u8; 4] = src_bytes).unwrap();
-        let dst = cortex_m::singleton!(: [u8; 4] = [0, 0, 0, 0]).unwrap();
-
-        let dma_config = lax_dma::Config {
-            word_size: lax_dma::TxSize::_8Bit,
-            source: lax_dma::Source {
-                address: src.as_ptr(),
-                increment: false,
-            },
-            destination: lax_dma::Destination {
-                address: dst.as_mut_ptr(),
-                increment: true,
-            },
-            tx_count: dst.len() as u32,
-            tx_req: lax_dma::TxReq::Permanent,
-            byte_swap: false,
-            start: false,
-        };
-
-        let dma: lax_dma::LaxDmaWrite<dma::CH5> = lax_dma::LaxDmaWrite::new(dma_config);
-
-        defmt::debug!("DMA source addr: {:x}", src.as_ptr());
-        defmt::debug!("DMA dest addr: {:x}", dst.as_ptr());
-
-        defmt::debug!("src: {:?}", src);
-        defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
-
-        defmt::debug!("Starting DMA");
-        dma.trigger();
-        dma.wait();
-        defmt::debug!("DMA done");
-
-        defmt::debug!("src: {:?}", src);
-        defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
-
-        if dst != &expected {
-            defmt::error!(
-                "!!! {} failed! Expected: {:?}, got: {:?}",
-                function!(),
-                expected,
-                dst
-            );
-        } else {
-            defmt::info!(
-                "*** {} passed. Expected: {:?}, got: {:?}",
-                function!(),
-                expected,
-                dst
-            );
-        }
-    }
-
-    fn dma_test_16bit_fill(src_bytes: [u8; 4], expected: [u8; 4]) {
-        defmt::info!("*** Running DMA test {}", function!());
-
-        let src = cortex_m::singleton!(: [u8; 4] = src_bytes).unwrap();
-        let dst = cortex_m::singleton!(: [u8; 4] = [0, 0, 0, 0]).unwrap();
-
-        let dma_config = lax_dma::Config {
-            word_size: lax_dma::TxSize::_16bit,
-            source: lax_dma::Source {
-                address: src.as_ptr(),
-                increment: false,
-            },
-            destination: lax_dma::Destination {
-                address: dst.as_mut_ptr(),
-                increment: true,
-            },
-            tx_count: dst.len() as u32 / core::mem::size_of::<u16>() as u32,
-            tx_req: lax_dma::TxReq::Permanent,
-            byte_swap: false,
-            start: false,
-        };
-
-        let dma: lax_dma::LaxDmaWrite<dma::CH5> = lax_dma::LaxDmaWrite::new(dma_config);
-
-        defmt::debug!("DMA source addr: {:x}", src.as_ptr());
-        defmt::debug!("DMA dest addr: {:x}", dst.as_ptr());
-
-        defmt::debug!("src: {:?}", src);
-        defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
-
-        defmt::debug!("Starting DMA");
-        dma.trigger();
-        dma.wait();
-        defmt::debug!("DMA done");
-
-        defmt::debug!("src: {:?}", src);
-        defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
-
-        if dst != &expected {
-            defmt::error!(
-                "!!! {} failed! Expected: {:?}, got: {:?}",
-                function!(),
-                expected,
-                dst
-            );
-        } else {
-            defmt::info!(
-                "*** {} passed. Expected: {:?}, got: {:?}",
-                function!(),
-                expected,
-                dst
-            );
-        }
-    }
-
-    fn dma_test_32bit_fill(src_bytes: [u8; 4], expected: [u8; 4]) {
-        defmt::info!("*** Running DMA test {}", function!());
-
-        let src = cortex_m::singleton!(: [u8; 4] = src_bytes).unwrap();
-        let dst = cortex_m::singleton!(: [u8; 4] = [0, 0, 0, 0]).unwrap();
-
-        let dma_config = lax_dma::Config {
-            word_size: lax_dma::TxSize::_32bit,
-            source: lax_dma::Source {
-                address: src.as_ptr(),
-                increment: false,
-            },
-            destination: lax_dma::Destination {
-                address: dst.as_mut_ptr(),
-                increment: true,
-            },
-            tx_count: dst.len() as u32 / core::mem::size_of::<u32>() as u32,
-            tx_req: lax_dma::TxReq::Permanent,
-            byte_swap: false,
-            start: false,
-        };
-
-        let dma: lax_dma::LaxDmaWrite<dma::CH5> = lax_dma::LaxDmaWrite::new(dma_config);
-
-        defmt::debug!("DMA source addr: {:x}", src.as_ptr());
-        defmt::debug!("DMA dest addr: {:x}", dst.as_ptr());
-
-        defmt::debug!("src: {:?}", src);
-        defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
-
-        defmt::debug!("Starting DMA");
-        dma.trigger();
-        dma.wait();
-        defmt::debug!("DMA done");
-
-        defmt::debug!("src: {:?}", src);
-        defmt::debug!("dst: {:?}", dst);
-        defmt::debug!("DMA read error: {:?}", dma.read_error());
-        defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
-        defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
-
-        if dst != &expected {
-            defmt::error!(
-                "!!! {} failed! Expected: {:?}, got: {:?}",
-                function!(),
-                expected,
-                dst
-            );
-        } else {
-            defmt::info!(
-                "*** {} passed. Expected: {:?}, got: {:?}",
-                function!(),
+                test_name,
                 expected,
                 dst
             );
@@ -764,14 +241,172 @@ pub mod tests {
     }
 
     pub fn run_dma_tests() {
-        dma_test_8bit([42, 43, 44, 45], [42, 43, 44, 45]);
-        dma_test_16bit([42, 43, 44, 45], [42, 43, 44, 45]);
-        dma_test_32bit([42, 43, 44, 45], [42, 43, 44, 45]);
-        dma_test_8bit_byte_swap([42, 43, 44, 45], [42, 43, 44, 45]);
-        dma_test_16bit_byte_swap([42, 43, 44, 45], [43, 42, 45, 44]);
-        dma_test_32bit_byte_swap([42, 43, 44, 45], [45, 44, 43, 42]);
-        dma_test_8bit_fill([42, 43, 44, 45], [42, 42, 42, 42]);
-        dma_test_16bit_fill([42, 43, 44, 45], [42, 43, 42, 43]);
-        dma_test_32bit_fill([42, 43, 44, 45], [42, 43, 44, 45]);
+        // Test 1: 8-bit transfer with source and destination incrementing
+        let src1 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
+        let dst1 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
+        run_dma_test(
+            src1,
+            dst1,
+            [42, 43, 44, 45],
+            lax_dma::TxSize::_8Bit,
+            false,
+            true, // increment_src
+            true, // increment_dst
+            "dma_test_8bit",
+        );
+
+        // Test 2: 16-bit transfer with source and destination incrementing
+        let src2 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
+        let dst2 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
+        run_dma_test(
+            src2,
+            dst2,
+            [42, 43, 44, 45],
+            lax_dma::TxSize::_16bit,
+            false,
+            true,
+            true,
+            "dma_test_16bit",
+        );
+
+        // Test 3: 32-bit transfer with source and destination incrementing
+        let src3 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
+        let dst3 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
+        run_dma_test(
+            src3,
+            dst3,
+            [42, 43, 44, 45],
+            lax_dma::TxSize::_32bit,
+            false,
+            true,
+            true,
+            "dma_test_32bit",
+        );
+
+        // Test 4: 8-bit transfer with byte swap enabled
+        let src4 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
+        let dst4 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
+        run_dma_test(
+            src4,
+            dst4,
+            [42, 43, 44, 45],
+            lax_dma::TxSize::_8Bit,
+            true, // byte_swap
+            true,
+            true,
+            "dma_test_8bit_byte_swap",
+        );
+
+        // Test 5: 16-bit transfer with byte swap enabled
+        let src5 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
+        let dst5 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
+        run_dma_test(
+            src5,
+            dst5,
+            [43, 42, 45, 44],
+            lax_dma::TxSize::_16bit,
+            true,
+            true,
+            true,
+            "dma_test_16bit_byte_swap",
+        );
+
+        // Test 6: 32-bit transfer with byte swap enabled
+        let src6 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
+        let dst6 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
+        run_dma_test(
+            src6,
+            dst6,
+            [45, 44, 43, 42],
+            lax_dma::TxSize::_32bit,
+            true,
+            true,
+            true,
+            "dma_test_32bit_byte_swap",
+        );
+
+        // Test 7: 8-bit fill transfer (source does not increment)
+        let src7 = cortex_m::singleton!(: [u8; 4] = [42, 0, 0, 0]).unwrap();
+        let dst7 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
+        run_dma_test(
+            src7,
+            dst7,
+            [42, 42, 42, 42],
+            lax_dma::TxSize::_8Bit,
+            false,
+            false, // increment_src
+            true,
+            "dma_test_8bit_fill",
+        );
+
+        // Test 8: 16-bit fill transfer (source does not increment)
+        let src8 = cortex_m::singleton!(: [u8; 4] = [42, 43, 0, 0]).unwrap();
+        let dst8 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
+        run_dma_test(
+            src8,
+            dst8,
+            [42, 43, 42, 43],
+            lax_dma::TxSize::_16bit,
+            false,
+            false,
+            true,
+            "dma_test_16bit_fill",
+        );
+
+        // Test 9: 32-bit fill transfer (source does not increment)
+        let src9 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
+        let dst9 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
+        run_dma_test(
+            src9,
+            dst9,
+            [42, 43, 44, 45],
+            lax_dma::TxSize::_32bit,
+            false,
+            false,
+            true,
+            "dma_test_32bit_fill",
+        );
+
+        // Test 10: 8-bit transfer with destination not incrementing
+        let src10 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
+        let dst10 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
+        run_dma_test(
+            src10,
+            dst10,
+            [45, 0, 0, 0],
+            lax_dma::TxSize::_8Bit,
+            false,
+            true,
+            false, // increment_dst
+            "dma_test_8bit_dst_fixed",
+        );
+
+        // Test 11: 16-bit transfer with destination not incrementing
+        let src11 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
+        let dst11 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
+        run_dma_test(
+            src11,
+            dst11,
+            [44, 45, 0, 0],
+            lax_dma::TxSize::_16bit,
+            false,
+            true,
+            false,
+            "dma_test_16bit_dst_fixed",
+        );
+
+        // Test 12: 32-bit transfer with destination not incrementing
+        let src12 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
+        let dst12 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
+        run_dma_test(
+            src12,
+            dst12,
+            [42, 43, 44, 45],
+            lax_dma::TxSize::_32bit,
+            false,
+            true,
+            false,
+            "dma_test_32bit_dst_fixed",
+        );
     }
 }
