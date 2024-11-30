@@ -4,6 +4,7 @@ use core::marker::PhantomData;
 use rp2040_hal::dma;
 
 #[allow(dead_code)]
+#[derive(Copy, Clone)]
 #[repr(u8)]
 pub enum TxSize {
     _8Bit = 0,
@@ -12,6 +13,7 @@ pub enum TxSize {
 }
 
 #[allow(dead_code)]
+#[derive(Copy, Clone)]
 #[repr(u8)]
 pub enum TxReq {
     Pio0Tx0 = 0,
@@ -61,15 +63,20 @@ pub enum TxReq {
     Permanent = 63,
 }
 
+#[derive(Copy, Clone)]
+
 pub struct Source {
     pub address: *const u8,
     pub increment: bool,
 }
 
+#[derive(Copy, Clone)]
+
 pub struct Destination {
     pub address: *mut u8,
     pub increment: bool,
 }
+#[derive(Copy, Clone)]
 
 pub struct Config {
     pub word_size: TxSize,
@@ -167,7 +174,7 @@ pub mod tests {
     use crate::lax_dma;
     use rp2040_hal::dma;
 
-    fn run_dma_test(
+    struct TestConfig {
         src: &'static mut [u8; 4],
         dst: &'static mut [u8; 4],
         expected: [u8; 4],
@@ -176,17 +183,32 @@ pub mod tests {
         increment_src: bool,
         increment_dst: bool,
         test_name: &'static str,
-    ) {
-        defmt::info!("*** Running DMA test {}", test_name);
+    }
 
+    fn run_dma_test<CHID: dma::ChannelIndex>(config: TestConfig) {
+        let TestConfig {
+            src,
+            dst,
+            expected,
+            word_size,
+            byte_swap,
+            increment_src,
+            increment_dst,
+            test_name,
+        } = config;
+
+        defmt::info!("*** Running DMA test {}, channel {}", test_name, CHID::id());
+
+        // Calculate the transaction count based on the word size
         let tx_count = match word_size {
             lax_dma::TxSize::_8Bit => dst.len() as u32,
             lax_dma::TxSize::_16bit => dst.len() as u32 / core::mem::size_of::<u16>() as u32,
             lax_dma::TxSize::_32bit => dst.len() as u32 / core::mem::size_of::<u32>() as u32,
         };
 
+        // Configure the DMA transfer
         let dma_config = lax_dma::Config {
-            word_size,
+            word_size: word_size,
             source: lax_dma::Source {
                 address: src.as_ptr(),
                 increment: increment_src,
@@ -197,11 +219,11 @@ pub mod tests {
             },
             tx_count,
             tx_req: lax_dma::TxReq::Permanent,
-            byte_swap,
+            byte_swap: byte_swap,
             start: false,
         };
 
-        let dma: lax_dma::LaxDmaWrite<dma::CH5> = lax_dma::LaxDmaWrite::new(dma_config);
+        let dma: lax_dma::LaxDmaWrite<CHID> = lax_dma::LaxDmaWrite::new(dma_config);
 
         defmt::debug!("DMA source addr: {:x}", src.as_ptr() as usize);
         defmt::debug!("DMA dest addr: {:x}", dst.as_ptr() as usize);
@@ -214,15 +236,18 @@ pub mod tests {
         dma.wait();
         defmt::debug!("DMA done");
 
+        // Log final state
         defmt::debug!("src: {:?}", src);
         defmt::debug!("dst: {:?}", dst);
 
+        // Check for DMA errors
         defmt::debug!("DMA read error: {:?}", dma.read_error());
         defmt::debug!("DMA write error: {:?}", dma.write_error());
-        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr());
-        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr());
+        defmt::debug!("DMA last read addr: {:x}", dma.last_read_addr() as usize);
+        defmt::debug!("DMA last write addr: {:x}", dma.last_write_addr() as usize);
         defmt::debug!("DMA tx count remaining: {:?}", dma.tx_count_remaining());
 
+        // Validate the result
         if dst != &expected {
             defmt::error!(
                 "!!! {} failed! Expected: {:?}, got: {:?}",
@@ -241,172 +266,132 @@ pub mod tests {
     }
 
     pub fn run_dma_tests() {
-        // Test 1: 8-bit transfer with source and destination incrementing
-        let src1 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
-        let dst1 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
-        run_dma_test(
-            src1,
-            dst1,
-            [42, 43, 44, 45],
-            lax_dma::TxSize::_8Bit,
-            false,
-            true, // increment_src
-            true, // increment_dst
-            "dma_test_8bit",
-        );
+        // Define the test configurations
+        let tests = [
+            TestConfig {
+                src: cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap(),
+                dst: cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap(),
+                expected: [42, 43, 44, 45],
+                word_size: lax_dma::TxSize::_8Bit,
+                byte_swap: false,
+                increment_src: true,
+                increment_dst: true,
+                test_name: "dma_test_8bit",
+            },
+            TestConfig {
+                src: cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap(),
+                dst: cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap(),
+                expected: [42, 43, 44, 45],
+                word_size: lax_dma::TxSize::_16bit,
+                byte_swap: false,
+                increment_src: true,
+                increment_dst: true,
+                test_name: "dma_test_16bit",
+            },
+            TestConfig {
+                src: cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap(),
+                dst: cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap(),
+                expected: [42, 43, 44, 45],
+                word_size: lax_dma::TxSize::_32bit,
+                byte_swap: false,
+                increment_src: true,
+                increment_dst: true,
+                test_name: "dma_test_32bit",
+            },
+            TestConfig {
+                src: cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap(),
+                dst: cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap(),
+                expected: [42, 43, 44, 45],
+                word_size: lax_dma::TxSize::_8Bit,
+                byte_swap: true,
+                increment_src: true,
+                increment_dst: true,
+                test_name: "dma_test_8bit_byte_swap",
+            },
+            TestConfig {
+                src: cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap(),
+                dst: cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap(),
+                expected: [43, 42, 45, 44],
+                word_size: lax_dma::TxSize::_16bit,
+                byte_swap: true,
+                increment_src: true,
+                increment_dst: true,
+                test_name: "dma_test_16bit_byte_swap",
+            },
+            TestConfig {
+                src: cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap(),
+                dst: cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap(),
+                expected: [45, 44, 43, 42],
+                word_size: lax_dma::TxSize::_32bit,
+                byte_swap: true,
+                increment_src: true,
+                increment_dst: true,
+                test_name: "dma_test_32bit_byte_swap",
+            },
+            TestConfig {
+                src: cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap(),
+                dst: cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap(),
+                expected: [42, 42, 42, 42],
+                word_size: lax_dma::TxSize::_8Bit,
+                byte_swap: false,
+                increment_src: false,
+                increment_dst: true,
+                test_name: "dma_test_8bit_fill",
+            },
+            TestConfig {
+                src: cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap(),
+                dst: cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap(),
+                expected: [42, 43, 42, 43],
+                word_size: lax_dma::TxSize::_16bit,
+                byte_swap: false,
+                increment_src: false,
+                increment_dst: true,
+                test_name: "dma_test_16bit_fill",
+            },
+            TestConfig {
+                src: cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap(),
+                dst: cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap(),
+                expected: [42, 43, 44, 45],
+                word_size: lax_dma::TxSize::_32bit,
+                byte_swap: false,
+                increment_src: false,
+                increment_dst: true,
+                test_name: "dma_test_32bit_fill",
+            },
+            TestConfig {
+                src: cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap(),
+                dst: cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap(),
+                expected: [45, 0, 0, 0],
+                word_size: lax_dma::TxSize::_8Bit,
+                byte_swap: false,
+                increment_src: true,
+                increment_dst: false,
+                test_name: "dma_test_8bit_dst_fixed",
+            },
+            TestConfig {
+                src: cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap(),
+                dst: cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap(),
+                expected: [44, 45, 0, 0],
+                word_size: lax_dma::TxSize::_16bit,
+                byte_swap: false,
+                increment_src: true,
+                increment_dst: false,
+                test_name: "dma_test_16bit_dst_fixed",
+            },
+            TestConfig {
+                src: cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap(),
+                dst: cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap(),
+                expected: [42, 43, 44, 45],
+                word_size: lax_dma::TxSize::_32bit,
+                byte_swap: false,
+                increment_src: true,
+                increment_dst: false,
+                test_name: "dma_test_32bit_dst_fixed",
+            },
+        ];
 
-        // Test 2: 16-bit transfer with source and destination incrementing
-        let src2 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
-        let dst2 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
-        run_dma_test(
-            src2,
-            dst2,
-            [42, 43, 44, 45],
-            lax_dma::TxSize::_16bit,
-            false,
-            true,
-            true,
-            "dma_test_16bit",
-        );
-
-        // Test 3: 32-bit transfer with source and destination incrementing
-        let src3 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
-        let dst3 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
-        run_dma_test(
-            src3,
-            dst3,
-            [42, 43, 44, 45],
-            lax_dma::TxSize::_32bit,
-            false,
-            true,
-            true,
-            "dma_test_32bit",
-        );
-
-        // Test 4: 8-bit transfer with byte swap enabled
-        let src4 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
-        let dst4 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
-        run_dma_test(
-            src4,
-            dst4,
-            [42, 43, 44, 45],
-            lax_dma::TxSize::_8Bit,
-            true, // byte_swap
-            true,
-            true,
-            "dma_test_8bit_byte_swap",
-        );
-
-        // Test 5: 16-bit transfer with byte swap enabled
-        let src5 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
-        let dst5 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
-        run_dma_test(
-            src5,
-            dst5,
-            [43, 42, 45, 44],
-            lax_dma::TxSize::_16bit,
-            true,
-            true,
-            true,
-            "dma_test_16bit_byte_swap",
-        );
-
-        // Test 6: 32-bit transfer with byte swap enabled
-        let src6 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
-        let dst6 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
-        run_dma_test(
-            src6,
-            dst6,
-            [45, 44, 43, 42],
-            lax_dma::TxSize::_32bit,
-            true,
-            true,
-            true,
-            "dma_test_32bit_byte_swap",
-        );
-
-        // Test 7: 8-bit fill transfer (source does not increment)
-        let src7 = cortex_m::singleton!(: [u8; 4] = [42, 0, 0, 0]).unwrap();
-        let dst7 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
-        run_dma_test(
-            src7,
-            dst7,
-            [42, 42, 42, 42],
-            lax_dma::TxSize::_8Bit,
-            false,
-            false, // increment_src
-            true,
-            "dma_test_8bit_fill",
-        );
-
-        // Test 8: 16-bit fill transfer (source does not increment)
-        let src8 = cortex_m::singleton!(: [u8; 4] = [42, 43, 0, 0]).unwrap();
-        let dst8 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
-        run_dma_test(
-            src8,
-            dst8,
-            [42, 43, 42, 43],
-            lax_dma::TxSize::_16bit,
-            false,
-            false,
-            true,
-            "dma_test_16bit_fill",
-        );
-
-        // Test 9: 32-bit fill transfer (source does not increment)
-        let src9 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
-        let dst9 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
-        run_dma_test(
-            src9,
-            dst9,
-            [42, 43, 44, 45],
-            lax_dma::TxSize::_32bit,
-            false,
-            false,
-            true,
-            "dma_test_32bit_fill",
-        );
-
-        // Test 10: 8-bit transfer with destination not incrementing
-        let src10 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
-        let dst10 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
-        run_dma_test(
-            src10,
-            dst10,
-            [45, 0, 0, 0],
-            lax_dma::TxSize::_8Bit,
-            false,
-            true,
-            false, // increment_dst
-            "dma_test_8bit_dst_fixed",
-        );
-
-        // Test 11: 16-bit transfer with destination not incrementing
-        let src11 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
-        let dst11 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
-        run_dma_test(
-            src11,
-            dst11,
-            [44, 45, 0, 0],
-            lax_dma::TxSize::_16bit,
-            false,
-            true,
-            false,
-            "dma_test_16bit_dst_fixed",
-        );
-
-        // Test 12: 32-bit transfer with destination not incrementing
-        let src12 = cortex_m::singleton!(: [u8; 4] = [42, 43, 44, 45]).unwrap();
-        let dst12 = cortex_m::singleton!(: [u8; 4] = [0; 4]).unwrap();
-        run_dma_test(
-            src12,
-            dst12,
-            [42, 43, 44, 45],
-            lax_dma::TxSize::_32bit,
-            false,
-            true,
-            false,
-            "dma_test_32bit_dst_fixed",
-        );
+        for test in tests.into_iter() {
+            run_dma_test::<dma::CH5>(test);
+        }
     }
 }
