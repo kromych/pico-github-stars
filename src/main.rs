@@ -11,6 +11,7 @@ use embedded_graphics::{
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal::pwm::SetDutyCycle;
 use fugit::{HertzU32, RateExtU32};
+use rp2040_hal::dma::DMAExt;
 use rp2040_hal::{dma, gpio, pwm, rom_data, spi, Clock};
 use spi::Spi;
 
@@ -131,8 +132,8 @@ where
         vsync_pin: gpio::Pin<VSYNC, gpio::FunctionSioInput, gpio::PullNone>,
         spi_device: SPIDEV,
         spi_pinout: SPIPINOUT,
-        _dma_channel_x: DMAX,
-        _dma_channel_y: DMAY,
+        _dma_channel_x: dma::Channel<DMAX>,
+        _dma_channel_y: dma::Channel<DMAY>,
         delay_source: &mut cortex_m::delay::Delay,
         resets: &mut rp2040_pac::RESETS,
         peri_frequency: F,
@@ -496,6 +497,8 @@ fn main() -> ! {
     let mosi_pin = pins.gpio19.into_function::<gpio::FunctionSpi>();
     let vsync_pin = pins.gpio21.into_floating_input();
 
+    let dma = pac.DMA.split(&mut pac.RESETS);
+
     let pwm_slices = pwm::Slices::new(pac.PWM, &mut pac.RESETS);
     let mut backlight_pwm = pwm_slices.pwm2;
     backlight_pwm.set_ph_correct();
@@ -513,8 +516,8 @@ fn main() -> ! {
         vsync_pin,
         pac.SPI0,
         (mosi_pin, sck_pin),
-        dma::CH0,
-        dma::CH1,
+        dma.ch0,
+        dma.ch1,
         &mut delay,
         &mut pac.RESETS,
         clocks.peripheral_clock.freq(),

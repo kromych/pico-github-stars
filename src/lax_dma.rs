@@ -104,6 +104,7 @@ impl<CHID: dma::ChannelIndex, CHIDCHAIN: dma::ChannelIndex> LaxDmaWrite<CHID, CH
         cortex_m::asm::dsb();
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
+        ch.ch_al1_ctrl().reset();
         ch.ch_al1_ctrl().write(|w| unsafe {
             w.data_size().bits(config.word_size as u8);
             w.incr_read().bit(src_incr);
