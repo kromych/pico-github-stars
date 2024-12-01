@@ -55,7 +55,10 @@ pub enum DisplayRotation {
     Rotate270,
 }
 
-fn get_display_dimensions(kind: DisplayKind) -> (u16, u16) {
+const DISPLAY_KIND: DisplayKind = DisplayKind::PicoDisplay2_8;
+const DISPLAY_ROTATION: DisplayRotation = DisplayRotation::Rotate0;
+
+const fn get_display_dimensions(kind: DisplayKind) -> (u16, u16) {
     match kind {
         DisplayKind::PicoDisplay1_14 => (240, 135),
         DisplayKind::PicoDisplaySquare => (240, 240),
@@ -64,15 +67,15 @@ fn get_display_dimensions(kind: DisplayKind) -> (u16, u16) {
     }
 }
 
+pub const WIDTH: usize = get_display_dimensions(DISPLAY_KIND).0 as usize;
+pub const HEIGHT: usize = get_display_dimensions(DISPLAY_KIND).1 as usize;
+
 const MADCTL_ROW_ORDER: u8 = 0b10000000;
 const MADCTL_COL_ORDER: u8 = 0b01000000;
 const MADCTL_SWAP_XY: u8 = 0b00100000; // AKA "MV"
 const MADCTL_SCAN_ORDER: u8 = 0b00010000;
-const _MADCTL_RGB_BGR: u8 = 0b00001000;
+const MADCTL_RGB_BGR: u8 = 0b00001000;
 const MADCTL_HORIZ_ORDER: u8 = 0b00000100;
-
-pub const WIDTH: usize = 240;
-pub const HEIGHT: usize = 320;
 
 static mut FRAMEBUFFER: [u16; WIDTH * HEIGHT] = [0; WIDTH * HEIGHT]; // TODO: Use StaticCell
 
@@ -199,8 +202,8 @@ where
             dma_channel_x: PhantomData,
             dma_channel_y: PhantomData,
             last_vsync_time: 0,
-            kind: DisplayKind::PicoDisplay2_8,
-            rotation: DisplayRotation::Rotate0,
+            kind: DISPLAY_KIND,
+            rotation: DISPLAY_ROTATION,
             pixel_count: WIDTH as u32 * HEIGHT as u32,
         };
 
@@ -209,7 +212,7 @@ where
 
         delay_source.delay_ms(150);
 
-        display.write_command_with_data(Command::TEON, &[0]); // enable frame sync signal if used (horizontal only)
+        display.write_command_with_data(Command::TEON, &[1]); // enable frame sync signal if used (horizontal only)
         display.write_command_with_data(Command::COLMOD, &[0x55]); // 16 bits per pixel, RGB565
 
         display.write_command_with_data(Command::PORCTRL, &[0x0c, 0x0c, 0x00, 0x33, 0x33]);
@@ -292,7 +295,7 @@ where
 
         display.configure_display();
 
-        display.set_backlight(20);
+        display.set_backlight(40);
         delay_source.delay_ms(10);
 
         display
@@ -425,13 +428,7 @@ where
             };
         }
 
-        self.write_command(Command::CASET);
-        self.write_data(&caset[0].to_be_bytes());
-        self.write_data(&caset[1].to_be_bytes());
-
-        self.write_command(Command::RASET);
-        self.write_data(&raset[0].to_be_bytes());
-        self.write_data(&raset[1].to_be_bytes());
+        self.set_address_window(caset[0], raset[0], caset[1], raset[1]);
 
         self.write_command(Command::MADCTL);
         self.write_data(&[madctl]);
@@ -493,23 +490,15 @@ where
         }
     }
 
-    pub fn fill(&mut self, color: u16) {
+    fn write_framebuffer(&mut self) {
         self.set_address_window(0, 0, WIDTH as u16 - 1, HEIGHT as u16 - 1);
-        self.write_command(Command::RAMWR);
-        for _ in 0..WIDTH * HEIGHT {
-            self.write_data(&color.to_be_bytes());
-        }
-    }
-
-    pub fn flush(&mut self) {
-        self.set_address_window(0, 0, HEIGHT as u16 - 1, WIDTH as u16 - 1);
         self.write_command(Command::RAMWR);
 
         self.cs_pin.set_low().unwrap();
         self.dc_pin.set_high().unwrap();
 
         let dma_config = lax_dma::Config {
-            word_size: lax_dma::TxSize::_16bit,
+            word_size: lax_dma::TxSize::_8bit,
             source: lax_dma::Source {
                 address: unsafe { FRAMEBUFFER.as_ptr().cast() },
                 increment: true,
@@ -518,9 +507,9 @@ where
                 address: self.sspdr.cast(),
                 increment: false,
             },
-            tx_count: WIDTH as u32 * HEIGHT as u32,
+            tx_count: 2 * WIDTH as u32 * HEIGHT as u32,
             tx_req: lax_dma::TxReq::Spi0Tx, // TODO: hardcoded
-            byte_swap: true,
+            byte_swap: false,
             start: true,
         };
 
@@ -558,28 +547,22 @@ where
         self.backlight_pwm.set_duty_cycle_fully_off().unwrap();
     }
 
-    // fn wait_for_flush(&mut self) {
-    //     self.dma_channel.wait();
-    // }
+    pub fn flush(&mut self) {
+        self.wait_for_vsync();
+        self.write_framebuffer();
+    }
 
-    // pub fn flush(&mut self) {
-    //     self.wait_for_vsync();
-    //     self.start_flush();
-    //     self.wait_for_flush();
-    // }
+    pub fn draw(&mut self, func: impl FnOnce(&mut Self)) {
+        func(self);
+        self.wait_for_vsync();
+        self.write_framebuffer();
+    }
 
-    // pub fn draw(&mut self, func: impl FnOnce(&mut Self)) {
-    //     self.wait_for_flush();
-    //     func(self);
-    //     self.wait_for_vsync();
-    //     self.start_flush();
-    // }
-
-    // pub fn wait_for_vsync(&mut self) {
-    //     while self.lcd_vsync_pin.is_high().unwrap() {}
-    //     while self.lcd_vsync_pin.is_low().unwrap() {}
-    //     self.last_vsync_time = time::time_us();
-    // }
+    pub fn wait_for_vsync(&mut self) {
+        while self.vsync_pin.is_high().unwrap() {}
+        while self.vsync_pin.is_low().unwrap() {}
+        self.last_vsync_time = crate::time::time_us();
+    }
 }
 
 impl<

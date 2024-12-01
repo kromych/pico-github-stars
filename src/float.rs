@@ -1,5 +1,7 @@
 //! Floating-point math functions
-
+//!
+//! TODO: Use `micromath` crate for optimized floating-point math functions
+//!
 #![allow(dead_code)]
 
 #[cfg(feature = "use-rom-instrinsics")]

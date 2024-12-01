@@ -1,20 +1,21 @@
 #![no_std]
 #![no_main]
 
+use defmt_rtt as _;
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
+use embedded_graphics::primitives::PrimitiveStyleBuilder;
+use embedded_graphics::primitives::Rectangle;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::pwm::SetDutyCycle;
 use fugit::RateExtU32;
+use panic_probe as _;
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::gpio;
 use rp2040_hal::pwm;
 use rp2040_hal::rom_data;
 use rp2040_hal::Clock;
-
-use defmt_rtt as _;
-use panic_probe as _;
 
 mod float;
 mod lax_dma;
@@ -108,10 +109,40 @@ fn main() -> ! {
         clocks.peripheral_clock.freq(),
         62_500.kHz(),
     );
-    display.set_backlight(40);
-    display.fill(Rgb565::GREEN.into_storage());
 
-    display.clear(Rgb565::RED).unwrap();
+    display.clear(Rgb565::BLACK).unwrap();
+
+    Rectangle::new(Point::new(0, 0), Size::new(100, 120))
+        .into_styled(
+            PrimitiveStyleBuilder::new()
+                .fill_color(Rgb565::RED)
+                .stroke_color(Rgb565::WHITE)
+                .stroke_width(2)
+                .build(),
+        )
+        .draw(&mut display)
+        .unwrap();
+    Rectangle::new(Point::new(100, 120), Size::new(100, 120))
+        .into_styled(
+            PrimitiveStyleBuilder::new()
+                .fill_color(Rgb565::GREEN)
+                .stroke_color(Rgb565::WHITE)
+                .stroke_width(2)
+                .build(),
+        )
+        .draw(&mut display)
+        .unwrap();
+    Rectangle::new(Point::new(200, 0), Size::new(100, 120))
+        .into_styled(
+            PrimitiveStyleBuilder::new()
+                .fill_color(Rgb565::BLUE)
+                .stroke_color(Rgb565::WHITE)
+                .stroke_width(2)
+                .build(),
+        )
+        .draw(&mut display)
+        .unwrap();
+
     display.flush();
 
     loop {
