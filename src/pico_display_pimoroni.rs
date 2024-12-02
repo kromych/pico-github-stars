@@ -10,6 +10,8 @@
 //!
 //! https://github.com/pimoroni/pimoroni-pico/blob/main/drivers/st7789/st7789.cpp
 //!
+//! The `DrawTarget` implementation is based on the `st7789` crate.
+//!
 //#![no_std]
 
 #![allow(dead_code)]
@@ -53,6 +55,13 @@ pub enum DisplayRotation {
     Rotate90,
     Rotate180,
     Rotate270,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+pub enum TearingEffect {
+    Off,
+    Vertical,
+    HorizontalAndVertical,
 }
 
 const DISPLAY_KIND: DisplayKind = DisplayKind::PicoDisplay2_8;
@@ -148,6 +157,7 @@ where
     dma_channel_x: PhantomData<DMAX>,
     dma_channel_y: PhantomData<DMAY>,
     sspdr: *mut u32,
+    tearing_effect: TearingEffect,
     last_vsync_time: u32,
 }
 
@@ -205,6 +215,7 @@ where
             kind: DISPLAY_KIND,
             rotation: DISPLAY_ROTATION,
             pixel_count: WIDTH as u32 * HEIGHT as u32,
+            tearing_effect: TearingEffect::Off,
         };
 
         display.no_backlight();
@@ -212,7 +223,6 @@ where
 
         delay_source.delay_ms(150);
 
-        display.write_command_with_data(Command::TEON, &[1]); // enable frame sync signal if used (horizontal only)
         display.write_command_with_data(Command::COLMOD, &[0x55]); // 16 bits per pixel, RGB565
 
         display.write_command_with_data(Command::PORCTRL, &[0x0c, 0x0c, 0x00, 0x33, 0x33]);
@@ -294,6 +304,7 @@ where
         delay_source.delay_ms(10);
 
         display.configure_display();
+        display.set_tearing_effect(TearingEffect::HorizontalAndVertical);
 
         display.set_backlight(40);
         delay_source.delay_ms(10);
@@ -547,21 +558,33 @@ where
         self.backlight_pwm.set_duty_cycle_fully_off().unwrap();
     }
 
-    pub fn flush(&mut self) {
+    #[inline(always)]
+    pub fn render_frame(&mut self, render_func: impl FnOnce(&mut Self)) {
+        render_func(self);
         self.wait_for_vsync();
         self.write_framebuffer();
     }
 
-    pub fn draw(&mut self, func: impl FnOnce(&mut Self)) {
-        func(self);
-        self.wait_for_vsync();
-        self.write_framebuffer();
+    pub fn set_tearing_effect(&mut self, tearing_effect: TearingEffect) {
+        self.tearing_effect = tearing_effect;
+        match self.tearing_effect {
+            TearingEffect::Off => self.write_command(Command::TEOFF),
+            TearingEffect::Vertical => self.write_command_with_data(Command::TEON, &[0]),
+            TearingEffect::HorizontalAndVertical => {
+                self.write_command_with_data(Command::TEON, &[1])
+            }
+        };
     }
 
-    pub fn wait_for_vsync(&mut self) {
+    #[inline(always)]
+    fn wait_for_vsync(&mut self) {
+        if self.tearing_effect == TearingEffect::Off {
+            return;
+        }
+
         while self.vsync_pin.is_high().unwrap() {}
-        while self.vsync_pin.is_low().unwrap() {}
-        self.last_vsync_time = crate::time::time_us();
+        // while self.vsync_pin.is_low().unwrap() {}
+        // self.last_vsync_time = crate::time::time_us();
     }
 }
 

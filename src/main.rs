@@ -111,39 +111,38 @@ fn main() -> ! {
     );
 
     display.clear(Rgb565::BLACK).unwrap();
-
-    Rectangle::new(Point::new(0, 0), Size::new(100, 120))
-        .into_styled(
-            PrimitiveStyleBuilder::new()
-                .fill_color(Rgb565::RED)
-                .stroke_color(Rgb565::WHITE)
-                .stroke_width(2)
-                .build(),
-        )
-        .draw(&mut display)
-        .unwrap();
-    Rectangle::new(Point::new(100, 120), Size::new(100, 120))
-        .into_styled(
-            PrimitiveStyleBuilder::new()
-                .fill_color(Rgb565::GREEN)
-                .stroke_color(Rgb565::WHITE)
-                .stroke_width(2)
-                .build(),
-        )
-        .draw(&mut display)
-        .unwrap();
-    Rectangle::new(Point::new(200, 0), Size::new(100, 120))
-        .into_styled(
-            PrimitiveStyleBuilder::new()
-                .fill_color(Rgb565::BLUE)
-                .stroke_color(Rgb565::WHITE)
-                .stroke_width(2)
-                .build(),
-        )
-        .draw(&mut display)
-        .unwrap();
-
-    display.flush();
+    display.render_frame(|display| {
+        Rectangle::new(Point::new(0, 0), Size::new(100, 120))
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .fill_color(Rgb565::RED)
+                    .stroke_color(Rgb565::WHITE)
+                    .stroke_width(2)
+                    .build(),
+            )
+            .draw(display)
+            .unwrap();
+        Rectangle::new(Point::new(100, 120), Size::new(100, 120))
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .fill_color(Rgb565::GREEN)
+                    .stroke_color(Rgb565::WHITE)
+                    .stroke_width(2)
+                    .build(),
+            )
+            .draw(display)
+            .unwrap();
+        Rectangle::new(Point::new(200, 0), Size::new(100, 120))
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .fill_color(Rgb565::BLUE)
+                    .stroke_color(Rgb565::WHITE)
+                    .stroke_width(2)
+                    .build(),
+            )
+            .draw(display)
+            .unwrap();
+    });
 
     loop {
         cortex_m::asm::wfe();
