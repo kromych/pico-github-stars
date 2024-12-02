@@ -231,7 +231,26 @@ where
         display.write_command_with_data(Command::VRHS, &[0x12]);
         display.write_command_with_data(Command::VDVS, &[0x20]);
         display.write_command_with_data(Command::PWCTRL1, &[0xa4, 0xa1]);
-        display.write_command_with_data(Command::FRCTRL2, &[0x0f]);
+        /*
+           Frame rate:
+           0x00 = 119Hz, 0x10 = 58Hz,
+           0x01 = 111Hz, 0x11 = 57Hz,
+           0x02 = 105Hz, 0x12 = 55Hz,
+           0x03 = 99Hz, 0x13 = 53Hz,
+           0x04 = 94Hz, 0x14 = 52Hz,
+           0x05 = 90Hz, 0x15 = 50Hz,
+           0x06 = 86Hz, 0x16 = 49Hz,
+           0x07 = 82Hz, 0x17 = 48Hz,
+           0x08 = 78Hz, 0x18 = 46Hz,
+           0x09 = 75Hz, 0x19 = 45Hz,
+           0x0A = 72Hz, 0x1A = 44Hz,
+           0x0B = 69Hz, 0x1B = 43Hz,
+           0x0C = 67Hz, 0x1C = 42Hz,
+           0x0D = 64Hz, 0x1D = 41Hz,
+           0x0E = 62Hz, 0x1E = 40Hz,
+           0x0F = 60Hz, 0x1F = 39Hz
+        */
+        display.write_command_with_data(Command::FRCTRL2, &[0x1f]);
 
         match display.kind {
             DisplayKind::PicoDisplaySquare => {
