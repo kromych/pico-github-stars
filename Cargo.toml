@@ -30,7 +30,7 @@ embedded-graphics = "0.8"
 [profile.release]
 debug = 2
 lto = true
-opt-level = 'z'
+opt-level = 3
 
 [profile.dev]
 debug = 2
