@@ -86,6 +86,8 @@ const MADCTL_SCAN_ORDER: u8 = 0b00010000;
 const MADCTL_RGB_BGR: u8 = 0b00001000;
 const MADCTL_HORIZ_ORDER: u8 = 0b00000100;
 
+// TODO: move outside of the module, pass a reference to the framebuffer, or the block of memory
+// to draw on and send to the display.
 static mut FRAMEBUFFER: [u16; WIDTH * HEIGHT] = [0; WIDTH * HEIGHT]; // TODO: Use StaticCell
 
 #[allow(clippy::upper_case_acronyms, dead_code)]
