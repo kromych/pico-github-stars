@@ -479,11 +479,11 @@ where
     fn write_data(&mut self, data: &[u8]) {
         self.dc_pin.set_high().unwrap();
 
+        self.cs_pin.set_low().unwrap();
         for byte in data {
-            self.cs_pin.set_low().unwrap();
             self.spi_device.write(&[*byte]).unwrap(); // TODO: Handle error
-            self.cs_pin.set_high().unwrap();
         }
+        self.cs_pin.set_high().unwrap();
 
         // defmt::info!("Command 0x{:x}", command as u8);
     }
