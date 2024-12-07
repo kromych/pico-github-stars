@@ -11,13 +11,14 @@ use embedded_hal::digital::OutputPin;
 use embedded_hal::pwm::SetDutyCycle;
 use fugit::RateExtU32;
 use panic_probe as _;
+use pico_display_pimoroni::DisplayKind;
+use pico_display_pimoroni::DisplayRotation;
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::gpio;
 use rp2040_hal::pwm;
 use rp2040_hal::rom_data;
 use rp2040_hal::Clock;
 
-mod float;
 mod lax_dma;
 mod pico_display_pimoroni;
 
@@ -37,6 +38,13 @@ mod time {
 
 #[rp_pico::entry]
 fn main() -> ! {
+    const DISPLAY_KIND: DisplayKind = DisplayKind::PicoDisplay2_8;
+    const DISPLAY_ROTATION: DisplayRotation = DisplayRotation::Rotate0;
+    const DISPLAY_WIDTH: u32 = DISPLAY_KIND.width() as u32;
+    const DISPLAY_HEIGHT: u32 = DISPLAY_KIND.height() as u32;
+
+    let mut buffer = [0u16; DISPLAY_WIDTH as usize * DISPLAY_HEIGHT as usize];
+
     defmt::info!(
         "Board {}, git revision {:x}, ROM verion {:x}, time {:x} us",
         rom_data::copyright_string(),
@@ -96,6 +104,8 @@ fn main() -> ! {
 
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
     let mut display = pico_display_pimoroni::Display::new(
+        DISPLAY_KIND,
+        DISPLAY_ROTATION,
         backlight_pwm.channel_a,
         dc_pin,
         cs_pin,
@@ -110,39 +120,28 @@ fn main() -> ! {
         62_500.kHz(),
     );
 
-    display.clear(Rgb565::BLACK).unwrap();
-    display.render_frame(|display| {
-        Rectangle::new(Point::new(0, 0), Size::new(100, 120))
-            .into_styled(
-                PrimitiveStyleBuilder::new()
-                    .fill_color(Rgb565::RED)
-                    .stroke_color(Rgb565::WHITE)
-                    .stroke_width(2)
-                    .build(),
-            )
-            .draw(display)
-            .unwrap();
-        Rectangle::new(Point::new(100, 120), Size::new(100, 120))
-            .into_styled(
-                PrimitiveStyleBuilder::new()
-                    .fill_color(Rgb565::GREEN)
-                    .stroke_color(Rgb565::WHITE)
-                    .stroke_width(2)
-                    .build(),
-            )
-            .draw(display)
-            .unwrap();
-        Rectangle::new(Point::new(200, 0), Size::new(100, 120))
-            .into_styled(
-                PrimitiveStyleBuilder::new()
-                    .fill_color(Rgb565::BLUE)
-                    .stroke_color(Rgb565::WHITE)
-                    .stroke_width(2)
-                    .build(),
-            )
-            .draw(display)
-            .unwrap();
-    });
+    let mut frame = display.whole_screen(&mut buffer).unwrap();
+    frame.clear(Rgb565::BLACK).unwrap();
+    let colors = [Rgb565::RED, Rgb565::GREEN, Rgb565::BLUE];
+    for i in 0..3 {
+        Rectangle::new(
+            Point::new(
+                (i * DISPLAY_WIDTH / 3) as i32,
+                (i * DISPLAY_HEIGHT / 4) as i32,
+            ),
+            Size::new(DISPLAY_WIDTH / 3, DISPLAY_HEIGHT / 2),
+        )
+        .into_styled(
+            PrimitiveStyleBuilder::new()
+                .fill_color(colors[i as usize])
+                .stroke_color(Rgb565::WHITE)
+                .stroke_width(2)
+                .build(),
+        )
+        .draw(&mut frame)
+        .unwrap();
+    }
+    frame.flush();
 
     loop {
         cortex_m::asm::wfe();

@@ -12,6 +12,17 @@
 //!
 //! The `DrawTarget` implementation is based on the `st7789` crate.
 //!
+//! The code uses the `powf` function. It comes from the `libm` crate, that is as much accurate as
+//! the hard float implementation of the `powf` function is, and is a dozen times faster than the
+//! float functions in the Pico ROM. That is, at the expense of using a bit more flash memory.
+//!
+//! There is also the `micromath` crate that provides a `powf` function that is around 30% faster
+//! than the `libm` crate, but it is less accurate. Again, that costs a bit more flash memory.
+//!
+//! Acuuracy is not a big concern here, as the `powf` function is used to compute the gamma
+//! correction for the backlight PWM, and the difference in the gamma correction value is not
+//! noticeable. Still, the `libm` crate is used here for the sake of accuracy.
+//!
 //#![no_std]
 
 #![allow(dead_code)]
@@ -24,6 +35,7 @@ use embedded_graphics::prelude::Dimensions;
 use embedded_graphics::prelude::DrawTarget;
 use embedded_graphics::prelude::IntoStorage;
 use embedded_graphics::prelude::OriginDimensions;
+use embedded_graphics::prelude::Point;
 use embedded_graphics::prelude::RawData;
 use embedded_graphics::prelude::RgbColor;
 use embedded_graphics::prelude::Size;
@@ -40,6 +52,16 @@ use rp2040_hal::gpio;
 use rp2040_hal::pwm;
 use rp2040_hal::spi;
 use rp2040_hal::Spi;
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
+pub enum DisplayError {
+    Spi,
+    Dma,
+    FramebufferSizeMismatch,
+    BufferSizeMismatch,
+    BufferRectSizeMismatch,
+}
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -65,9 +87,6 @@ pub enum TearingEffect {
     HorizontalAndVertical,
 }
 
-const DISPLAY_KIND: DisplayKind = DisplayKind::PicoDisplay2_8;
-const DISPLAY_ROTATION: DisplayRotation = DisplayRotation::Rotate0;
-
 const fn get_display_dimensions(kind: DisplayKind) -> (u16, u16) {
     match kind {
         DisplayKind::PicoDisplay1_14 => (240, 135),
@@ -77,8 +96,15 @@ const fn get_display_dimensions(kind: DisplayKind) -> (u16, u16) {
     }
 }
 
-pub const WIDTH: usize = get_display_dimensions(DISPLAY_KIND).0 as usize;
-pub const HEIGHT: usize = get_display_dimensions(DISPLAY_KIND).1 as usize;
+impl DisplayKind {
+    pub const fn width(&self) -> u16 {
+        get_display_dimensions(*self).0
+    }
+
+    pub const fn height(&self) -> u16 {
+        get_display_dimensions(*self).1
+    }
+}
 
 const MADCTL_ROW_ORDER: u8 = 0b10000000;
 const MADCTL_COL_ORDER: u8 = 0b01000000;
@@ -86,10 +112,6 @@ const MADCTL_SWAP_XY: u8 = 0b00100000; // AKA "MV"
 const MADCTL_SCAN_ORDER: u8 = 0b00010000;
 const MADCTL_RGB_BGR: u8 = 0b00001000;
 const MADCTL_HORIZ_ORDER: u8 = 0b00000100;
-
-// TODO: move outside of the module, pass a reference to the framebuffer, or the block of memory
-// to draw on and send to the display.
-static mut FRAMEBUFFER: [u16; WIDTH * HEIGHT] = [0; WIDTH * HEIGHT]; // TODO: Use StaticCell
 
 #[allow(clippy::upper_case_acronyms, dead_code)]
 #[derive(Copy, Clone, Debug)]
@@ -149,8 +171,10 @@ where
     DMAY: dma::ChannelIndex,
     pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
 {
-    kind: DisplayKind,
-    rotation: DisplayRotation,
+    display_kind: DisplayKind,
+    display_rotation: DisplayRotation,
+    width: u16,
+    height: u16,
     pixel_count: u32,
     backlight_pwm: pwm::Channel<PWMSLICE, PWMCHAN>,
     dc_pin: gpio::Pin<DC, gpio::FunctionSioOutput, gpio::PullDown>,
@@ -162,6 +186,55 @@ where
     sspdr: *mut u32,
     tearing_effect: TearingEffect,
     last_vsync_time: u32,
+}
+
+pub struct DisplayFrame<'a, DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>
+where
+    DC: gpio::PinId,
+    CS: gpio::PinId,
+    VSYNC: gpio::PinId,
+    SPIDEV: spi::SpiDevice,
+    SPIPINOUT: spi::ValidSpiPinout<SPIDEV>,
+    PWMSLICE: pwm::AnySlice,
+    PWMCHAN: pwm::ChannelId,
+    DMAX: dma::ChannelIndex,
+    DMAY: dma::ChannelIndex,
+    pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
+{
+    display: &'a mut Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>,
+    sx: u16,
+    sy: u16,
+    ex: u16,
+    ey: u16,
+    buffer: &'a mut [u16],
+}
+
+impl<
+        DC: gpio::PinId,
+        CS: gpio::PinId,
+        VSYNC: gpio::PinId,
+        SPIDEV: spi::SpiDevice,
+        SPIPINOUT: spi::ValidSpiPinout<SPIDEV>,
+        PWMSLICE: pwm::AnySlice,
+        PWMCHAN: pwm::ChannelId,
+        DMAX: dma::ChannelIndex,
+        DMAY: dma::ChannelIndex,
+    > DisplayFrame<'_, DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>
+where
+    pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
+{
+    #[inline(always)]
+    pub fn flush(&mut self) {
+        self.display.wait_for_vsync();
+        self.display
+            .write_buffer(self.sx, self.sy, self.ex, self.ey, self.buffer);
+    }
+
+    #[inline(always)]
+    pub fn render(&mut self, render_func: impl FnOnce(&mut Self)) {
+        render_func(self);
+        self.flush();
+    }
 }
 
 impl<
@@ -180,6 +253,8 @@ where
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new<F, B>(
+        display_kind: DisplayKind,
+        display_rotation: DisplayRotation,
         backlight_pwm: pwm::Channel<PWMSLICE, PWMCHAN>,
         dc_pin: gpio::Pin<DC, gpio::FunctionSioOutput, gpio::PullDown>,
         cs_pin: gpio::Pin<CS, gpio::FunctionSioOutput, gpio::PullDown>,
@@ -205,6 +280,7 @@ where
             baudrate.into(),
             embedded_hal::spi::MODE_0,
         );
+        let (width, height) = get_display_dimensions(display_kind);
         let mut display = Self {
             backlight_pwm,
             dc_pin,
@@ -215,9 +291,11 @@ where
             dma_channel_x: PhantomData,
             dma_channel_y: PhantomData,
             last_vsync_time: 0,
-            kind: DISPLAY_KIND,
-            rotation: DISPLAY_ROTATION,
-            pixel_count: WIDTH as u32 * HEIGHT as u32,
+            display_kind,
+            display_rotation,
+            width,
+            height,
+            pixel_count: width as u32 * height as u32,
             tearing_effect: TearingEffect::Off,
         };
 
@@ -255,7 +333,7 @@ where
         */
         display.write_command_with_data(Command::FRCTRL2, &[0x1f]);
 
-        match display.kind {
+        match display.display_kind {
             DisplayKind::PicoDisplaySquare => {
                 display.write_command_with_data(Command::GCTRL, &[0x14]);
                 display.write_command_with_data(Command::VCOMS, &[0x37]);
@@ -336,8 +414,8 @@ where
 
     fn configure_display(&mut self) {
         let round = false;
-        let kind = self.kind;
-        let rotation = self.rotation;
+        let kind = self.display_kind;
+        let rotation = self.display_rotation;
         let (mut width, mut height) = get_display_dimensions(kind);
 
         if rotation == DisplayRotation::Rotate90 || rotation == DisplayRotation::Rotate270 {
@@ -506,25 +584,8 @@ where
         self.write_data(&ey.to_be_bytes());
     }
 
-    pub fn set_pixel(&mut self, x: u16, y: u16, color: u16) {
-        self.set_address_window(x, y, x, y);
-        self.write_command(Command::RAMWR);
-        self.write_data(&color.to_be_bytes());
-    }
-
-    pub fn set_pixels<T>(&mut self, sx: u16, sy: u16, ex: u16, ey: u16, colors: T)
-    where
-        T: IntoIterator<Item = u16>,
-    {
+    fn write_buffer(&mut self, sx: u16, sy: u16, ex: u16, ey: u16, buffer: &[u16]) {
         self.set_address_window(sx, sy, ex, ey);
-        self.write_command(Command::RAMWR);
-        for color in colors {
-            self.write_data(&color.to_be_bytes());
-        }
-    }
-
-    fn write_framebuffer(&mut self) {
-        self.set_address_window(0, 0, WIDTH as u16 - 1, HEIGHT as u16 - 1);
         self.write_command(Command::RAMWR);
 
         self.cs_pin.set_low().unwrap();
@@ -536,14 +597,14 @@ where
         let dma_config = lax_dma::Config {
             word_size: lax_dma::TxSize::_8bit,
             source: lax_dma::Source {
-                address: unsafe { FRAMEBUFFER.as_ptr().cast() },
+                address: buffer.as_ptr().cast(),
                 increment: true,
             },
             destination: lax_dma::Destination {
                 address: self.sspdr.cast(),
                 increment: false,
             },
-            tx_count: 2 * WIDTH as u32 * HEIGHT as u32,
+            tx_count: 2 * (ex - sx + 1) as u32 * (ey - sy + 1) as u32,
             tx_req,
             byte_swap: false,
             start: true,
@@ -560,9 +621,7 @@ where
 
     pub fn set_backlight(&mut self, value: u8) {
         const GAMMA: f32 = 2.8;
-        let pwm = (crate::float::rom_instrinsics::powf32((value as f32) / 255.0f32, GAMMA)
-            * 65535.0f32
-            + 0.5f32) as u16;
+        let pwm = (libm::powf((value as f32) / 255.0f32, GAMMA) * 65535.0f32 + 0.5f32) as u16;
 
         // defmt::info!("ROM computed backlight setting: {}", pwm);
         // let pwm = (float::handrolled::powf32((value as f32) / 255.0f32, GAMMA) * 65535.0f32
@@ -581,13 +640,6 @@ where
     pub fn no_backlight(&mut self) {
         defmt::info!("Disabling backlight");
         self.backlight_pwm.set_duty_cycle_fully_off().unwrap();
-    }
-
-    #[inline(always)]
-    pub fn render_frame(&mut self, render_func: impl FnOnce(&mut Self)) {
-        render_func(self);
-        self.wait_for_vsync();
-        self.write_framebuffer();
     }
 
     pub fn set_tearing_effect(&mut self, tearing_effect: TearingEffect) {
@@ -611,24 +663,48 @@ where
         // while self.vsync_pin.is_low().unwrap() {}
         // self.last_vsync_time = crate::time::time_us();
     }
-}
 
-impl<
-        DC: gpio::PinId,
-        CS: gpio::PinId,
-        VSYNC: gpio::PinId,
-        SPIDEV: spi::SpiDevice,
-        SPIPINOUT: spi::ValidSpiPinout<SPIDEV>,
-        PWMSLICE: pwm::AnySlice,
-        PWMCHAN: pwm::ChannelId,
-        DMAX: dma::ChannelIndex,
-        DMAY: dma::ChannelIndex,
-    > OriginDimensions for Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>
-where
-    pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
-{
-    fn size(&self) -> Size {
-        Size::new(WIDTH as u32, HEIGHT as u32)
+    pub fn frame<'a>(
+        &'a mut self,
+        sx: u16,
+        sy: u16,
+        ex: u16,
+        ey: u16,
+        buffer: &'a mut [u16],
+    ) -> Result<
+        DisplayFrame<'a, DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>,
+        DisplayError,
+    > {
+        if sx >= ex || sy >= ey {
+            return Err(DisplayError::BufferRectSizeMismatch);
+        }
+
+        let width = ex - sx + 1;
+        let height = ey - sy + 1;
+        if buffer.len() != width as usize * height as usize {
+            return Err(DisplayError::BufferSizeMismatch);
+        }
+        if width > self.width || height > self.height {
+            return Err(DisplayError::FramebufferSizeMismatch);
+        }
+        Ok(DisplayFrame {
+            display: self,
+            sx,
+            sy,
+            ex,
+            ey,
+            buffer,
+        })
+    }
+
+    pub fn whole_screen<'a>(
+        &'a mut self,
+        buffer: &'a mut [u16],
+    ) -> Result<
+        DisplayFrame<'a, DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>,
+        DisplayError,
+    > {
+        self.frame(0, 0, self.width - 1, self.height - 1, buffer)
     }
 }
 
@@ -642,25 +718,46 @@ impl<
         PWMCHAN: pwm::ChannelId,
         DMAX: dma::ChannelIndex,
         DMAY: dma::ChannelIndex,
-    > DrawTarget for Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>
+    > OriginDimensions
+    for DisplayFrame<'_, DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>
+where
+    pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
+{
+    fn size(&self) -> Size {
+        Size::new(
+            (self.ex - self.sx + 1) as u32,
+            (self.ey - self.sy + 1) as u32,
+        )
+    }
+}
+
+impl<
+        DC: gpio::PinId,
+        CS: gpio::PinId,
+        VSYNC: gpio::PinId,
+        SPIDEV: spi::SpiDevice,
+        SPIPINOUT: spi::ValidSpiPinout<SPIDEV>,
+        PWMSLICE: pwm::AnySlice,
+        PWMCHAN: pwm::ChannelId,
+        DMAX: dma::ChannelIndex,
+        DMAY: dma::ChannelIndex,
+    > DrawTarget
+    for DisplayFrame<'_, DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>
 where
     pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
 {
     type Color = Rgb565;
-    type Error = core::convert::Infallible;
+    type Error = DisplayError;
 
     fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
     where
         I: IntoIterator<Item = Pixel<Self::Color>>,
     {
-        const M: u32 = WIDTH as u32 - 1;
-        const N: u32 = HEIGHT as u32 - 1;
         for Pixel(coord, color) in pixels.into_iter() {
-            if let Ok((x @ 0..=M, y @ 0..=N)) = coord.try_into() {
-                let index: u32 = x + y * WIDTH as u32;
-                let color = RawU16::from(color).into_inner();
-                unsafe { FRAMEBUFFER[index as usize] = color.to_be() };
-            }
+            let Point { x, y } = coord;
+            let index: u32 = x as u32 + y as u32 * self.size().width;
+            let color = RawU16::from(color).into_inner();
+            self.buffer[index as usize] = color.to_be();
         }
         Ok(())
     }
@@ -690,11 +787,12 @@ where
                 colors.next();
             }
 
-            let mut index = clipped_area.top_left.x + (clipped_area.top_left.y + y) * WIDTH as i32;
+            let mut index =
+                clipped_area.top_left.x + (clipped_area.top_left.y + y) * self.size().width as i32;
             for _ in 0..clipped_area.size.width {
                 let color = colors.next().unwrap_or(Rgb565::RED);
                 let color = RawU16::from(color).into_inner();
-                unsafe { FRAMEBUFFER[index as usize] = color.to_be() };
+                self.buffer[index as usize] = color.to_be();
                 index += 1;
             }
 
@@ -717,10 +815,10 @@ where
                 increment: false,
             },
             destination: lax_dma::Destination {
-                address: unsafe { FRAMEBUFFER.as_mut_ptr().cast() },
+                address: self.buffer.as_mut_ptr().cast(),
                 increment: true,
             },
-            tx_count: WIDTH as u32 * HEIGHT as u32,
+            tx_count: self.size().width * self.size().height,
             tx_req: lax_dma::TxReq::Permanent,
             byte_swap: false,
             start: true,

@@ -148,6 +148,11 @@ pub struct LaxDmaWrite<CHID: dma::ChannelIndex, CHIDCHAIN: dma::ChannelIndex = C
 }
 
 impl<CHID: dma::ChannelIndex, CHIDCHAIN: dma::ChannelIndex> LaxDmaWrite<CHID, CHIDCHAIN> {
+    /// Create a new DMA channel with the given configuration.
+    /// NOTE: be sure to reset the DMA system before using this function.
+    /// ```ignore
+    /// let dma = pac.DMA.split(&mut pac.RESETS);
+    /// ```
     pub fn new(config: Config) -> Self {
         let ch = unsafe { (*rp2040_pac::DMA::PTR).ch(CHID::id() as usize) };
 
