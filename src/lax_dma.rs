@@ -63,6 +63,59 @@ pub enum TxReq {
     Permanent = 63,
 }
 
+impl From<u8> for TxReq {
+    fn from(val: u8) -> Self {
+        match val {
+            0 => TxReq::Pio0Tx0,
+            1 => TxReq::Pio0Tx1,
+            2 => TxReq::Pio0Tx2,
+            3 => TxReq::Pio0Tx3,
+            4 => TxReq::Pio0Rx0,
+            5 => TxReq::Pio0Rx1,
+            6 => TxReq::Pio0Rx2,
+            7 => TxReq::Pio0Rx3,
+            8 => TxReq::Pio1Tx0,
+            9 => TxReq::Pio1Tx1,
+            10 => TxReq::Pio1Tx2,
+            11 => TxReq::Pio1Tx3,
+            12 => TxReq::Pio1Rx0,
+            13 => TxReq::Pio1Rx1,
+            14 => TxReq::Pio1Rx2,
+            15 => TxReq::Pio1Rx3,
+            16 => TxReq::Spi0Tx,
+            17 => TxReq::Spi0Rx,
+            18 => TxReq::Spi1Tx,
+            19 => TxReq::Spi1Rx,
+            20 => TxReq::Uart0Tx,
+            21 => TxReq::Uart0Rx,
+            22 => TxReq::Uart1Tx,
+            23 => TxReq::Uart1Rx,
+            24 => TxReq::PwmWrap0,
+            25 => TxReq::PwmWrap1,
+            26 => TxReq::PwmWrap2,
+            27 => TxReq::PwmWrap3,
+            28 => TxReq::PwmWrap4,
+            29 => TxReq::PwmWrap5,
+            30 => TxReq::PwmWrap6,
+            31 => TxReq::PwmWrap7,
+            32 => TxReq::I2C0Tx,
+            33 => TxReq::I2C0Rx,
+            34 => TxReq::I2C1Tx,
+            35 => TxReq::I2C1Rx,
+            36 => TxReq::Adc,
+            37 => TxReq::XipStream,
+            38 => TxReq::XipSsitx,
+            39 => TxReq::XipSsirx,
+            59 => TxReq::Timer0,
+            60 => TxReq::Timer1,
+            61 => TxReq::Timer2,
+            62 => TxReq::Timer3,
+            63 => TxReq::Permanent,
+            _ => panic!("Invalid TxReq value"),
+        }
+    }
+}
+
 #[derive(Copy, Clone)]
 
 pub struct Source {
@@ -210,7 +263,7 @@ pub mod tests {
 
         // Configure the DMA transfer
         let dma_config = lax_dma::Config {
-            word_size: word_size,
+            word_size,
             source: lax_dma::Source {
                 address: src.as_ptr(),
                 increment: increment_src,
@@ -221,7 +274,7 @@ pub mod tests {
             },
             tx_count,
             tx_req: lax_dma::TxReq::Permanent,
-            byte_swap: byte_swap,
+            byte_swap,
             start: false,
         };
 

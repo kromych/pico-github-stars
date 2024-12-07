@@ -35,6 +35,7 @@ use embedded_hal::pwm::SetDutyCycle;
 use embedded_hal::spi::SpiBus;
 use fugit::HertzU32;
 use rp2040_hal::dma;
+use rp2040_hal::dma::WriteTarget;
 use rp2040_hal::gpio;
 use rp2040_hal::pwm;
 use rp2040_hal::spi;
@@ -529,6 +530,9 @@ where
         self.cs_pin.set_low().unwrap();
         self.dc_pin.set_high().unwrap();
 
+        let tx_req = Spi::<spi::Enabled, SPIDEV, SPIPINOUT>::tx_treq()
+            .unwrap()
+            .into(); // TODO: Handle error, check ranges
         let dma_config = lax_dma::Config {
             word_size: lax_dma::TxSize::_8bit,
             source: lax_dma::Source {
@@ -540,7 +544,7 @@ where
                 increment: false,
             },
             tx_count: 2 * WIDTH as u32 * HEIGHT as u32,
-            tx_req: lax_dma::TxReq::Spi0Tx, // TODO: hardcoded
+            tx_req,
             byte_swap: false,
             start: true,
         };
