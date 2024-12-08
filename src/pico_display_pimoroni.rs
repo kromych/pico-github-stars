@@ -235,6 +235,26 @@ where
         render_func(self);
         self.flush();
     }
+
+    pub fn copy_raw_data(&mut self, data: &[u16], size: Size, position: Point) {
+        if data.len() != size.width as usize * size.height as usize {
+            return;
+        }
+
+        // TODO: Check if the rectangle is within the bounds of the display
+
+        let mut x = position.x as u16;
+        let mut y = position.y as u16;
+        for pixel in data {
+            self.buffer[(y * self.display.width + x) as usize] = *pixel;
+            x += 1;
+
+            if x as i32 >= position.x + size.width as i32 {
+                x = position.x as u16;
+                y += 1;
+            }
+        }
+    }
 }
 
 impl<

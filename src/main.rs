@@ -10,9 +10,14 @@ use embedded_graphics::primitives::Rectangle;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::pwm::SetDutyCycle;
 use fugit::RateExtU32;
+use matrix_symbols::BRIGHTNESS_LEVELS;
+use matrix_symbols::GLYPH_COUNT;
+use matrix_symbols::GLYPH_HEIGHT;
+use matrix_symbols::GLYPH_WIDTH;
 use panic_probe as _;
 use pico_display_pimoroni::DisplayKind;
 use pico_display_pimoroni::DisplayRotation;
+use rand::RngCore;
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::gpio;
 use rp2040_hal::pwm;
@@ -20,7 +25,9 @@ use rp2040_hal::rom_data;
 use rp2040_hal::Clock;
 
 mod lax_dma;
+mod matrix_symbols;
 mod pico_display_pimoroni;
+mod rng;
 
 #[allow(dead_code)]
 mod time {
@@ -121,6 +128,10 @@ fn main() -> ! {
     );
 
     let mut frame = display.whole_screen(&mut buffer).unwrap();
+    let mut symbol_data = [0u16; GLYPH_WIDTH as usize * GLYPH_HEIGHT as usize];
+    let size = Size::new(GLYPH_WIDTH as u32, GLYPH_HEIGHT as u32);
+    let mut rng = rng::RoscRng;
+
     frame.clear(Rgb565::BLACK).unwrap();
     let colors = [Rgb565::RED, Rgb565::GREEN, Rgb565::BLUE];
     for i in 0..3 {
@@ -143,8 +154,31 @@ fn main() -> ! {
     }
     frame.flush();
 
+    delay.delay_ms(1000);
+
+    let mut draw_some = || {
+        for _ in 0..300 {
+            let brightness = rng.next_u32() as usize % BRIGHTNESS_LEVELS;
+            let symbol = rng.next_u32() as usize % GLYPH_COUNT;
+            let x = rng.next_u32() as usize % (DISPLAY_WIDTH as usize);
+            let y = rng.next_u32() as usize % (DISPLAY_HEIGHT as usize);
+            let grid_x = x / GLYPH_WIDTH as usize * GLYPH_WIDTH as usize;
+            let grid_y = y / GLYPH_HEIGHT as usize * GLYPH_HEIGHT as usize;
+
+            matrix_symbols::get_matrix_symbol_rgb565(
+                symbol as u8,
+                brightness as u8,
+                &mut symbol_data,
+            );
+            frame.copy_raw_data(&symbol_data, size, Point::new(grid_x as i32, grid_y as i32));
+        }
+        frame.flush();
+    };
+
     loop {
-        cortex_m::asm::wfe();
-        defmt::info!("WFE time: {:x}", time::time_us64());
+        draw_some();
+        delay.delay_ms(70);
+        // cortex_m::asm::wfe();
+        // defmt::info!("WFE time: {:x}", time::time_us64());
     }
 }
