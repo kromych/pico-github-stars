@@ -258,7 +258,14 @@ const _PALETTE_24BIT: [[u8; 3]; 256] = [
     [0x5, 0x19, 0],
 ];
 
-// Palette data RGB565 big-endian
+// Palette data RGB565 big-endian. Computed from _PALETTE_24BIT:
+// ```
+// r = p[0] >> 3
+// g = p[1] >> 2
+// b = p[2] >> 3
+// rgb565 = (r << 11) | (g << 5) | b
+// rgb565_be = ((rgb565 & 0xff) << 8) | ((rgb565 & 0xff00) >> 8)
+// ```
 pub const PALETTE_565BE: [u16; 256] = [
     0, 0x101, 0xc000, 0x8000, 0x2101, 0x8000, 0x4101, 0xe000, 0x4000, 0xa000, 0xa209, 0xc100,
     0x6000, 0xc100, 0xa101, 0x101, 0x6101, 0x4101, 0x220a, 0xe100, 0x8312, 0xe312, 0xc000, 0x8211,
