@@ -580,11 +580,11 @@ where
     fn write_data(&mut self, data: &[u8]) {
         self.dc_pin.set_high().unwrap();
 
-        self.cs_pin.set_low().unwrap();
         for byte in data {
+            self.cs_pin.set_low().unwrap();
             self.spi_device.write(&[*byte]).unwrap(); // TODO: Handle error
+            self.cs_pin.set_high().unwrap();
         }
-        self.cs_pin.set_high().unwrap();
 
         // defmt::info!("Command 0x{:x}", command as u8);
     }
@@ -605,12 +605,6 @@ where
     }
 
     fn write_buffer(&mut self, sx: u16, sy: u16, ex: u16, ey: u16, buffer: &[u16]) {
-        self.set_address_window(sx, sy, ex, ey);
-        self.write_command(Command::RAMWR);
-
-        self.cs_pin.set_low().unwrap();
-        self.dc_pin.set_high().unwrap();
-
         let tx_req = Spi::<spi::Enabled, SPIDEV, SPIPINOUT>::tx_treq()
             .unwrap()
             .into(); // TODO: Handle error, check ranges
@@ -629,6 +623,12 @@ where
             byte_swap: false,
             start: true,
         };
+
+        self.set_address_window(sx, sy, ex, ey);
+        self.write_command(Command::RAMWR);
+
+        self.dc_pin.set_high().unwrap();
+        self.cs_pin.set_low().unwrap();
 
         let dma: lax_dma::LaxDmaWrite<DMAY> = lax_dma::LaxDmaWrite::new(dma_config);
         //dma.trigger();
