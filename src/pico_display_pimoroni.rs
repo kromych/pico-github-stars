@@ -23,6 +23,9 @@
 //! correction for the backlight PWM, and the difference in the gamma correction value is not
 //! noticeable. Still, the `libm` crate is used here for the sake of accuracy.
 //!
+//! NOTE: Some places use `u16`. Do pay attention to the potential overflows. Running the debug
+//! build is recommended.
+//!
 //#![no_std]
 
 #![allow(dead_code)]
@@ -243,14 +246,14 @@ where
 
         // TODO: Check if the rectangle is within the bounds of the display
 
-        let mut x = position.x as u16;
-        let mut y = position.y as u16;
+        let mut x = position.x;
+        let mut y = position.y;
         for pixel in data {
-            self.buffer[(y * self.display.width + x) as usize] = *pixel;
+            self.buffer[(y * self.display.width as i32 + x) as usize] = *pixel;
             x += 1;
 
             if x as i32 >= position.x + size.width as i32 {
-                x = position.x as u16;
+                x = position.x;
                 y += 1;
             }
         }
