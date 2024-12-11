@@ -847,10 +847,6 @@ where
         let dma: lax_dma::LaxDmaWrite<DMAX> = lax_dma::LaxDmaWrite::new(dma_config);
         //dma.trigger();
         dma.wait();
-        // defmt::info!("DMA done, first word: {:?}", unsafe { FRAMEBUFFER[0] });
-        // defmt::info!("DMA done, last word: {:?}", unsafe {
-        //     FRAMEBUFFER[WIDTH * HEIGHT - 1]
-        // });
 
         Ok(())
     }
