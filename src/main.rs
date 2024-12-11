@@ -2,11 +2,7 @@
 #![no_main]
 
 use defmt_rtt as _;
-use embedded_graphics::draw_target::DrawTarget;
-use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::PrimitiveStyleBuilder;
-use embedded_graphics::primitives::Rectangle;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::pwm::SetDutyCycle;
 use fugit::RateExtU32;
@@ -132,45 +128,57 @@ fn main() -> ! {
     let size = Size::new(GLYPH_WIDTH as u32, GLYPH_HEIGHT as u32);
     let mut rng = rng::RoscRng;
 
-    frame.clear(Rgb565::BLACK).unwrap();
-    let colors = [Rgb565::RED, Rgb565::GREEN, Rgb565::BLUE];
-    for i in 0..3 {
-        Rectangle::new(
-            Point::new(
-                (i * DISPLAY_WIDTH / 3) as i32,
-                (i * DISPLAY_HEIGHT / 4) as i32,
-            ),
-            Size::new(DISPLAY_WIDTH / 3, DISPLAY_HEIGHT / 2),
-        )
-        .into_styled(
-            PrimitiveStyleBuilder::new()
-                .fill_color(colors[i as usize])
-                .stroke_color(Rgb565::WHITE)
-                .stroke_width(2)
-                .build(),
-        )
-        .draw(&mut frame)
-        .unwrap();
-    }
-    frame.flush();
+    // {
+    //     use embedded_graphics::draw_target::DrawTarget;
+    //     use embedded_graphics::pixelcolor::Rgb565;
+    //     use embedded_graphics::primitives::PrimitiveStyleBuilder;
+    //     use embedded_graphics::primitives::Rectangle;
 
-    delay.delay_ms(1000);
+    //     frame.clear(Rgb565::BLACK).unwrap();
+    //     let colors = [Rgb565::RED, Rgb565::GREEN, Rgb565::BLUE];
+    //     for i in 0..3 {
+    //         Rectangle::new(
+    //             Point::new(
+    //                 (i * DISPLAY_WIDTH / 3) as i32,
+    //                 (i * DISPLAY_HEIGHT / 4) as i32,
+    //             ),
+    //             Size::new(DISPLAY_WIDTH / 3, DISPLAY_HEIGHT / 2),
+    //         )
+    //         .into_styled(
+    //             PrimitiveStyleBuilder::new()
+    //                 .fill_color(colors[i as usize])
+    //                 .stroke_color(Rgb565::WHITE)
+    //                 .stroke_width(2)
+    //                 .build(),
+    //         )
+    //         .draw(&mut frame)
+    //         .unwrap();
+    //     }
+    //     frame.flush();
+
+    //     delay.delay_ms(1000);
+    // }
 
     let mut draw_some = || {
+        let glyphs_per_x = DISPLAY_WIDTH as usize / GLYPH_WIDTH as usize;
+        let glyphs_per_y = DISPLAY_HEIGHT as usize / GLYPH_HEIGHT as usize;
+        let padding_x = (DISPLAY_WIDTH as usize - glyphs_per_x * GLYPH_WIDTH as usize) / 2;
+        let padding_y = (DISPLAY_HEIGHT as usize - glyphs_per_y * GLYPH_HEIGHT as usize) / 2;
+
         for _ in 0..300 {
             let brightness = rng.next_u32() as usize % BRIGHTNESS_LEVELS;
             let symbol = rng.next_u32() as usize % GLYPH_COUNT;
-            let x = rng.next_u32() as usize % (DISPLAY_WIDTH as usize);
-            let y = rng.next_u32() as usize % (DISPLAY_HEIGHT as usize);
-            let grid_x = x / GLYPH_WIDTH as usize * GLYPH_WIDTH as usize;
-            let grid_y = y / GLYPH_HEIGHT as usize * GLYPH_HEIGHT as usize;
+            let grid_x = rng.next_u32() as usize % glyphs_per_x;
+            let grid_y = rng.next_u32() as usize % glyphs_per_y;
+            let x = padding_x + grid_x * GLYPH_WIDTH as usize;
+            let y = padding_y + grid_y * GLYPH_HEIGHT as usize;
 
             matrix_symbols::get_matrix_symbol_rgb565(
                 symbol as u8,
                 brightness as u8,
                 &mut symbol_data,
             );
-            frame.copy_raw_data(&symbol_data, size, Point::new(grid_x as i32, grid_y as i32));
+            frame.copy_raw_data(&symbol_data, size, Point::new(x as i32, y as i32));
         }
         frame.flush();
     };
