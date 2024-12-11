@@ -198,7 +198,7 @@ impl<CHID: dma::ChannelIndex, CHIDCHAIN: dma::ChannelIndex> LaxDmaWrite<CHID, CH
     }
 
     pub fn is_done(&self) -> bool {
-        !self.ch.ch_ctrl_trig().read().busy().bit_is_set()
+        !self.ch.ch_al1_ctrl().read().busy().bit_is_set()
     }
 
     pub fn wait(&self) {
