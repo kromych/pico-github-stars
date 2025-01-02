@@ -501,9 +501,10 @@ pub mod tests {
 
         let invert_pio = pio_proc::pio_asm!(
             ".wrap_target",
-            "out     y, 1",
-            "mov     y, ~y",
-            "in      y, 1",
+            "out x, 32",
+            "mov x, ~x",
+            "mov isr, x",
+            "push",
             ".wrap"
         );
 
