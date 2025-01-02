@@ -50,6 +50,8 @@ use rp2040_hal::gpio::Pin;
 use rp2040_hal::gpio::PinId;
 use rp2040_hal::gpio::PullDown;
 use rp2040_hal::gpio::*;
+use rp2040_hal::pio::PIOBuilder;
+use rp2040_hal::pio::PIOExt;
 use rp2040_hal::pwm;
 use rp2040_hal::spi;
 use rp2040_hal::Clock;
@@ -414,6 +416,9 @@ where
     TDispAttr: DisplayAttributes,
 {
     pub fn new() -> Self {
+        crate::lax_dma::tests::test_with_pio();
+        todo!("Implement the Display::new method");
+
         let display_kind = TDispAttr::kind();
         let mut pac = rp2040_pac::Peripherals::take().unwrap();
         let core = rp2040_pac::CorePeripherals::take().unwrap();
@@ -723,6 +728,56 @@ where
         }
 
         let (mosi_pin, sck_pin, cs_pin, dc_pin) = display.release();
+
+        let build_color_pio = pio_proc::pio_asm!(
+            ".side_set 2",
+            ".wrap_target",
+            "more:",
+            "        out     y, 1 side 0", /* bpp */
+            "        mov     y, ~y side 0",
+            "        set     x, 11 side 2", /* 12/bpp */
+            "again:",
+            "        in      y, 1 side 0", /* bpp */
+            "        jmp     x--, again side 0",
+            "        wait    1 irq 4 side 0",
+            "        jmp     !osre, more side 0",
+            ".wrap"
+        );
+        let lcd_pio = pio_proc::pio_asm!(
+            ".side_set 2",
+            ".wrap_target",
+            "        set     x, 10 side 2",
+            "        mov     isr, x side 0",
+            "        in      null, 10 side 0",
+            "        mov     x, isr side 0",
+            "        jmp     x--, pullgo side 0",
+            "pullgo:",
+            "        irq     wait 4 side 0",
+            "        set     y, 11 side 0",
+            "        pull    side 0",
+            "getbits:",
+            "        out     pins, 1 side 2",
+            "        jmp     y--, getbits side 3",
+            "        jmp     x--, pullgo side 2",
+            ".wrap"
+        );
+
+        // let (mut pio, sm0, sm1, _, _) = pac.PIO0.split(&mut pac.RESETS);
+        // let installed_build_color_pio = pio.install(&build_color_pio.program).unwrap();
+        // let installed_lcd_pio = pio.install(&lcd_pio.program).unwrap();
+
+        // let (mut sm0, _, _) = PIOBuilder::from_installed_program(installed_build_color_pio)
+        //     .set_pins(pin0, 1)
+        //     .build(sm0);
+        // sm0.set_pindirs([(pin0, hal::pio::PinDir::Output)]);
+
+        // let (mut sm1, _, _) = PIOBuilder::from_installed_program(installed_lcd_pio)
+        //     .set_pins(pin1, 1)
+        //     .build(sm1);
+        // // The GPIO pin needs to be configured as an output.
+        // sm1.set_pindirs([(pin1, hal::pio::PinDir::Output)]);
+
+        //let group = sm0.with(sm1).sync().start();
 
         // Serious SPI speed
 

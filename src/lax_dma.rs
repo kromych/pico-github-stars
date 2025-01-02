@@ -237,7 +237,16 @@ impl LaxDmaWrite {
 #[allow(dead_code)]
 pub mod tests {
     use crate::lax_dma;
+    use crate::lax_dma::Config;
+    use crate::lax_dma::Destination;
+    use crate::lax_dma::LaxDmaWrite;
+    use crate::lax_dma::Source;
+    use crate::lax_dma::TxReq;
+    use crate::lax_dma::TxSize;
+    use cortex_m::asm::delay;
     use rp2040_hal::dma;
+    use rp2040_hal::dma::DMAExt;
+    use rp2040_hal::pio::PIOExt;
 
     struct TestConfig {
         src: &'static mut [u8; 4],
@@ -458,5 +467,100 @@ pub mod tests {
         for test in tests.into_iter() {
             run_dma_test::<dma::CH5>(test);
         }
+    }
+
+    pub fn test_with_pio() {
+        // | DMA Channel | Source (Read Address)      | Destination (Write Address) | FIFO Connection           | Shift Register              |
+        // |-------------|----------------------------|-----------------------------|---------------------------|-----------------------------|
+        // | DMA 1 (TX)  | RAM Buffer                 | PIO TX FIFO (PIO0_TXF_SM0)  | TX FIFO feeds OSR         | OSR (Output Shift Register) |
+        // | DMA 2 (RX)  | PIO RX FIFO (PIO0_RXF_SM0) | RAM Buffer                  | RX FIFO receives from ISR | ISR (Input Shift Register)  |
+
+        const SIZE: usize = 32;
+        let input_buffer = [0x55u8; SIZE];
+        let mut output_buffer = [0u8; SIZE];
+
+        defmt::info!("input_buffer: {:?}", input_buffer);
+        defmt::info!("output_buffer: {:?}", output_buffer);
+
+        const STATE_MACHINE: usize = 0;
+
+        let mut pac = rp2040_pac::Peripherals::take().unwrap();
+        let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
+
+        let _clocks = rp2040_hal::clocks::init_clocks_and_plls(
+            rp_pico::XOSC_CRYSTAL_FREQ,
+            pac.XOSC,
+            pac.CLOCKS,
+            pac.PLL_SYS,
+            pac.PLL_USB,
+            &mut pac.RESETS,
+            &mut watchdog,
+        )
+        .ok()
+        .unwrap();
+
+        let invert_pio = pio_proc::pio_asm!(
+            ".wrap_target",
+            "out     y, 1",
+            "mov     y, ~y",
+            "in      y, 1",
+            ".wrap"
+        );
+
+        let _dma = pac.DMA.split(&mut pac.RESETS);
+        let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
+        let installed_pio = pio.install(&invert_pio.program).unwrap();
+        let (mut sm0, _, _) =
+            rp2040_hal::pio::PIOBuilder::from_installed_program(installed_pio).build(sm0);
+        let sm0_running = sm0.start();
+
+        let txf = unsafe { (*rp2040_pac::PIO0::PTR).txf(STATE_MACHINE) };
+        let rxf = unsafe { (*rp2040_pac::PIO0::PTR).rxf(STATE_MACHINE) };
+
+        let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
+            word_size: TxSize::_8bit,
+            source: Source {
+                address: input_buffer.as_ptr(),
+                increment: true,
+            },
+            destination: Destination {
+                address: txf.as_ptr().cast(),
+                increment: false,
+            },
+            tx_count: SIZE as u32,
+            tx_req: TxReq::Pio0Tx0,
+            byte_swap: false,
+            start: false,
+        });
+        let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
+            word_size: TxSize::_8bit,
+            source: Source {
+                address: rxf.as_ptr().cast(),
+                increment: false,
+            },
+            destination: Destination {
+                address: output_buffer.as_mut_ptr(),
+                increment: true,
+            },
+            tx_count: SIZE as u32,
+            tx_req: TxReq::Pio0Rx0,
+            byte_swap: false,
+            start: false,
+        });
+
+        // Start the DMA transfers
+        dma1.trigger();
+        dma2.trigger();
+
+        delay(100);
+        defmt::info!("input_buffer: {:?}", input_buffer);
+        defmt::info!("output_buffer: {:?}", output_buffer);
+
+        // Wait for the DMA transfers to complete
+        dma1.wait();
+        dma2.wait();
+
+        defmt::info!("input_buffer: {:?}", input_buffer);
+        defmt::info!("output_buffer: {:?}", output_buffer);
     }
 }

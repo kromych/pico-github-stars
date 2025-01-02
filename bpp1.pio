@@ -1,0 +1,32 @@
+.program bpp1
+.side_set 2
+
+.wrap_target
+
+/* SM0 */
+more:
+        out     y, 1                   /* bpp */
+        mov     y, ~y
+        set     x, 11           side 2 /* 12/bpp */
+again:
+        in      y, 1                   /* bpp */
+        jmp     x--, again
+        wait    1 irq 4
+        jmp     !osre, more
+
+/* SM1 */
+        set     x, 10           side 2
+        mov     isr, x
+        in      null, 10
+        mov     x, isr
+        jmp     x--, pullgo
+pullgo:
+        irq     wait 4
+        set     y, 11
+        pull
+getbits:
+        out     pins, 1         side 2
+        jmp     y--, getbits    side 3
+        jmp     x--, pullgo     side 2
+
+.wrap
