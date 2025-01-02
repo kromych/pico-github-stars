@@ -478,8 +478,6 @@ pub mod tests {
         let input_buffer = [0x55u8; SIZE];
         let mut output_buffer = [0u8; SIZE];
 
-        const STATE_MACHINE: usize = 0;
-
         let mut pac = rp2040_pac::Peripherals::take().unwrap();
         let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
 
@@ -520,8 +518,8 @@ pub mod tests {
         let txf = tx.fifo_address();
         let rxf = rx.fifo_address();
 
-        defmt::info!("input_buffer: {:?}", input_buffer);
-        defmt::info!("output_buffer: {:?}", output_buffer);
+        defmt::info!("input_buffer: {:08b}", input_buffer);
+        defmt::info!("output_buffer: {:08b}", output_buffer);
 
         let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
             word_size: TxSize::_32bit,
@@ -562,7 +560,305 @@ pub mod tests {
         dma1.wait();
         dma2.wait();
 
-        defmt::info!("input_buffer: {:?}", input_buffer);
-        defmt::info!("output_buffer: {:?}", output_buffer);
+        defmt::info!("input_buffer: {:08b}", input_buffer);
+        defmt::info!("output_buffer: {:08b}", output_buffer);
+    }
+
+    pub fn test_with_pio_expand_12times() {
+        // | DMA Channel | Source (Read Address)      | Destination (Write Address) | FIFO Connection           | Shift Register              |
+        // |-------------|----------------------------|-----------------------------|---------------------------|-----------------------------|
+        // | DMA 1 (TX)  | RAM Buffer                 | PIO TX FIFO (PIO0_TXF_SM0)  | TX FIFO feeds OSR         | OSR (Output Shift Register) |
+        // | DMA 2 (RX)  | PIO RX FIFO (PIO0_RXF_SM0) | RAM Buffer                  | RX FIFO receives from ISR | ISR (Input Shift Register)  |
+
+        const SIZE: usize = 4;
+        let input_buffer = [0x5au8; SIZE];
+        let mut output_buffer = [0u8; 12 * SIZE]; // bpp = 1; 12 /bpp
+
+        let mut pac = rp2040_pac::Peripherals::take().unwrap();
+        let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
+
+        let _clocks = rp2040_hal::clocks::init_clocks_and_plls(
+            crate::XOSC_CRYSTAL_FREQ,
+            pac.XOSC,
+            pac.CLOCKS,
+            pac.PLL_SYS,
+            pac.PLL_USB,
+            &mut pac.RESETS,
+            &mut watchdog,
+        )
+        .ok()
+        .unwrap();
+
+        // bpp = 1, greyscale (effectively BW) so R == G == B, each
+        // repeating 12 times within RGB444.
+        // If a pixel == 1, produce twelve 1's,
+        // if a pixel == 0, produce twelve 0's.
+        let expand_times12_pio = pio_proc::pio_asm!(
+            ".wrap_target",
+            "           out     x, 1",  // bpp
+            "           set     y, 11", // 12/bpp - 1
+            "repeat:",
+            "           in      x, 1", // bpp
+            "           jmp     y--, repeat",
+            ".wrap"
+        );
+
+        // Reset DMA
+        let _dma = pac.DMA.split(&mut pac.RESETS);
+        // Reset PIO
+        let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
+
+        let installed_pio = pio.install(&expand_times12_pio.program).unwrap();
+        let (sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed_pio)
+            .autopull(true)
+            .autopush(true)
+            .build(sm0);
+        sm.start();
+
+        let txf = tx.fifo_address();
+        let rxf = rx.fifo_address();
+
+        defmt::info!("input_buffer: {:08b}", input_buffer);
+        defmt::info!("output_buffer: {:08b}", output_buffer);
+
+        let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
+            word_size: TxSize::_32bit,
+            source: Source {
+                address: input_buffer.as_ptr(),
+                increment: true,
+            },
+            destination: Destination {
+                address: txf.cast_mut().cast(),
+                increment: false,
+            },
+            tx_count: SIZE as u32 / 4,
+            tx_req: TxReq::Pio0Tx0,
+            byte_swap: false,
+            start: false,
+        });
+        let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
+            word_size: TxSize::_32bit,
+            source: Source {
+                address: rxf.cast(),
+                increment: false,
+            },
+            destination: Destination {
+                address: output_buffer.as_mut_ptr(),
+                increment: true,
+            },
+            tx_count: 12 * SIZE as u32 / 4,
+            tx_req: TxReq::Pio0Rx0,
+            byte_swap: false,
+            start: false,
+        });
+
+        // Start the DMA transfers
+        dma1.trigger();
+        dma2.trigger();
+
+        // Wait for the DMA transfers to complete
+        dma1.wait();
+        dma2.wait();
+
+        defmt::info!("input_buffer: {:08b}", input_buffer);
+        defmt::info!("output_buffer: {:08b}", output_buffer);
+    }
+
+    pub fn test_with_pio_expand_6times() {
+        // | DMA Channel | Source (Read Address)      | Destination (Write Address) | FIFO Connection           | Shift Register              |
+        // |-------------|----------------------------|-----------------------------|---------------------------|-----------------------------|
+        // | DMA 1 (TX)  | RAM Buffer                 | PIO TX FIFO (PIO0_TXF_SM0)  | TX FIFO feeds OSR         | OSR (Output Shift Register) |
+        // | DMA 2 (RX)  | PIO RX FIFO (PIO0_RXF_SM0) | RAM Buffer                  | RX FIFO receives from ISR | ISR (Input Shift Register)  |
+
+        const SIZE: usize = 4;
+        let input_buffer = [0x5au8; SIZE];
+        let mut output_buffer = [0u8; 6 * SIZE]; // bpp = 2, 12/bpp, 12 is the physical format RGB444
+
+        let mut pac = rp2040_pac::Peripherals::take().unwrap();
+        let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
+
+        let _clocks = rp2040_hal::clocks::init_clocks_and_plls(
+            crate::XOSC_CRYSTAL_FREQ,
+            pac.XOSC,
+            pac.CLOCKS,
+            pac.PLL_SYS,
+            pac.PLL_USB,
+            &mut pac.RESETS,
+            &mut watchdog,
+        )
+        .ok()
+        .unwrap();
+
+        // bpp = 2, greyscale so R == G == B, each
+        // repeating 12 times within RGB444.
+        // Pixel can be 0b00..0b11. Need to repeat that 6 times for greyscale
+        let expand_times6_pio = pio_proc::pio_asm!(
+            ".wrap_target",
+            "           out     x, 2", // bpp
+            "           set     y, 5", // 12/bpp - 1
+            "repeat:",
+            "           in      x, 2", // bpp
+            "           jmp     y--, repeat",
+            ".wrap"
+        );
+
+        // Reset DMA
+        let _dma = pac.DMA.split(&mut pac.RESETS);
+        // Reset PIO
+        let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
+
+        let installed_pio = pio.install(&expand_times6_pio.program).unwrap();
+        let (sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed_pio)
+            .autopull(true)
+            .autopush(true)
+            .build(sm0);
+        sm.start();
+
+        let txf = tx.fifo_address();
+        let rxf = rx.fifo_address();
+
+        defmt::info!("input_buffer: {:08b}", input_buffer);
+        defmt::info!("output_buffer: {:08b}", output_buffer);
+
+        let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
+            word_size: TxSize::_32bit,
+            source: Source {
+                address: input_buffer.as_ptr(),
+                increment: true,
+            },
+            destination: Destination {
+                address: txf.cast_mut().cast(),
+                increment: false,
+            },
+            tx_count: SIZE as u32 / 4,
+            tx_req: TxReq::Pio0Tx0,
+            byte_swap: false,
+            start: false,
+        });
+        let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
+            word_size: TxSize::_32bit,
+            source: Source {
+                address: rxf.cast(),
+                increment: false,
+            },
+            destination: Destination {
+                address: output_buffer.as_mut_ptr(),
+                increment: true,
+            },
+            tx_count: 6 * SIZE as u32 / 4,
+            tx_req: TxReq::Pio0Rx0,
+            byte_swap: false,
+            start: false,
+        });
+
+        // Start the DMA transfers
+        dma1.trigger();
+        dma2.trigger();
+
+        // Wait for the DMA transfers to complete
+        dma1.wait();
+        dma2.wait();
+
+        defmt::info!("input_buffer: {:08b}", input_buffer);
+        defmt::info!("output_buffer: {:08b}", output_buffer);
+    }
+
+    pub fn test_with_pio_expand_3times() {
+        // | DMA Channel | Source (Read Address)      | Destination (Write Address) | FIFO Connection           | Shift Register              |
+        // |-------------|----------------------------|-----------------------------|---------------------------|-----------------------------|
+        // | DMA 1 (TX)  | RAM Buffer                 | PIO TX FIFO (PIO0_TXF_SM0)  | TX FIFO feeds OSR         | OSR (Output Shift Register) |
+        // | DMA 2 (RX)  | PIO RX FIFO (PIO0_RXF_SM0) | RAM Buffer                  | RX FIFO receives from ISR | ISR (Input Shift Register)  |
+
+        const SIZE: usize = 4;
+        let input_buffer = [0x5au8; SIZE];
+        let mut output_buffer = [0u8; 3 * SIZE]; // bpp = 4, 12/bpp, 12 is the physical format RGB444
+
+        let mut pac = rp2040_pac::Peripherals::take().unwrap();
+        let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
+
+        let _clocks = rp2040_hal::clocks::init_clocks_and_plls(
+            crate::XOSC_CRYSTAL_FREQ,
+            pac.XOSC,
+            pac.CLOCKS,
+            pac.PLL_SYS,
+            pac.PLL_USB,
+            &mut pac.RESETS,
+            &mut watchdog,
+        )
+        .ok()
+        .unwrap();
+
+        // bpp = 4, greyscale so R == G == B, each
+        // repeating 3 times within RGB444.
+        // Pixel can be 0b0000..0b1111. Need to repeat that 3 times for greyscale
+        let expand_times6_pio = pio_proc::pio_asm!(
+            ".wrap_target",
+            "           out     x, 4", // bpp
+            "           set     y, 2", // 12/bpp - 1
+            "repeat:",
+            "           in      x, 4", // bpp
+            "           jmp     y--, repeat",
+            ".wrap"
+        );
+
+        // Reset DMA
+        let _dma = pac.DMA.split(&mut pac.RESETS);
+        // Reset PIO
+        let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
+
+        let installed_pio = pio.install(&expand_times6_pio.program).unwrap();
+        let (sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed_pio)
+            .autopull(true)
+            .autopush(true)
+            .build(sm0);
+        sm.start();
+
+        let txf = tx.fifo_address();
+        let rxf = rx.fifo_address();
+
+        defmt::info!("input_buffer: {:08b}", input_buffer);
+        defmt::info!("output_buffer: {:08b}", output_buffer);
+
+        let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
+            word_size: TxSize::_32bit,
+            source: Source {
+                address: input_buffer.as_ptr(),
+                increment: true,
+            },
+            destination: Destination {
+                address: txf.cast_mut().cast(),
+                increment: false,
+            },
+            tx_count: SIZE as u32 / 4,
+            tx_req: TxReq::Pio0Tx0,
+            byte_swap: false,
+            start: false,
+        });
+        let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
+            word_size: TxSize::_32bit,
+            source: Source {
+                address: rxf.cast(),
+                increment: false,
+            },
+            destination: Destination {
+                address: output_buffer.as_mut_ptr(),
+                increment: true,
+            },
+            tx_count: 3 * SIZE as u32 / 4,
+            tx_req: TxReq::Pio0Rx0,
+            byte_swap: false,
+            start: false,
+        });
+
+        // Start the DMA transfers
+        dma1.trigger();
+        dma2.trigger();
+
+        // Wait for the DMA transfers to complete
+        dma1.wait();
+        dma2.wait();
+
+        defmt::info!("input_buffer: {:08b}", input_buffer);
+        defmt::info!("output_buffer: {:08b}", output_buffer);
     }
 }

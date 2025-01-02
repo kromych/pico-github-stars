@@ -416,7 +416,7 @@ where
     TDispAttr: DisplayAttributes,
 {
     pub fn new() -> Self {
-        crate::lax_dma::tests::test_with_pio_invert();
+        crate::lax_dma::tests::test_with_pio_expand_3times();
         todo!("Implement the Display::new method");
 
         let display_kind = TDispAttr::kind();
