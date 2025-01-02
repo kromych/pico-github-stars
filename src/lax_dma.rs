@@ -1,6 +1,5 @@
 //! Very unsafe DMA driver for experimental purposes.
 
-use core::marker::PhantomData;
 use rp2040_hal::dma;
 
 #[allow(dead_code)]
@@ -141,19 +140,25 @@ pub struct Config {
     pub start: bool,
 }
 
-pub struct LaxDmaWrite<CHID: dma::ChannelIndex, CHIDCHAIN: dma::ChannelIndex = CHID> {
-    _ch_id: PhantomData<CHID>,
-    _ch_id_chain: PhantomData<CHIDCHAIN>,
+pub struct LaxDmaWrite {
+    ch_id: u8,
+    ch_id_chain: u8,
     ch: &'static rp2040_pac::dma::ch::CH,
 }
 
-impl<CHID: dma::ChannelIndex, CHIDCHAIN: dma::ChannelIndex> LaxDmaWrite<CHID, CHIDCHAIN> {
-    /// Create a new DMA channel with the given configuration.
-    /// NOTE: be sure to reset the DMA system before using this function.
-    /// ```ignore
-    /// let dma = pac.DMA.split(&mut pac.RESETS);
-    /// ```
-    pub fn new(config: Config) -> Self {
+/// Create a new DMA channel with the given configuration.
+/// NOTE: be sure to reset the DMA system before using this function.
+/// ```ignore
+/// let dma = pac.DMA.split(&mut pac.RESETS);
+/// ```
+impl LaxDmaWrite {
+    pub fn new<CHID: dma::ChannelIndex>(config: Config) -> Self {
+        LaxDmaWrite::new_chained::<CHID, CHID>(config)
+    }
+
+    pub fn new_chained<CHID: dma::ChannelIndex, CHIDCHAIN: dma::ChannelIndex>(
+        config: Config,
+    ) -> Self {
         let ch = unsafe { (*rp2040_pac::DMA::PTR).ch(CHID::id() as usize) };
 
         let (src, src_incr) = (config.source.address, config.source.increment);
@@ -184,14 +189,14 @@ impl<CHID: dma::ChannelIndex, CHIDCHAIN: dma::ChannelIndex> LaxDmaWrite<CHID, CH
         }
 
         Self {
-            _ch_id: PhantomData,
-            _ch_id_chain: PhantomData,
+            ch_id: CHID::id(),
+            ch_id_chain: CHIDCHAIN::id(),
             ch,
         }
     }
 
     pub fn trigger(&self) {
-        let channel_flags = 1 << CHID::id() | 1 << CHIDCHAIN::id();
+        let channel_flags = 1 << self.ch_id | 1 << self.ch_id_chain;
         unsafe { &*rp2040_pac::DMA::ptr() }
             .multi_chan_trigger()
             .write(|w| unsafe { w.bits(channel_flags) });
@@ -283,7 +288,7 @@ pub mod tests {
             start: false,
         };
 
-        let dma: lax_dma::LaxDmaWrite<CHID> = lax_dma::LaxDmaWrite::new(dma_config);
+        let dma = lax_dma::LaxDmaWrite::new::<CHID>(dma_config);
 
         defmt::debug!("DMA source addr: {:x}", src.as_ptr() as usize);
         defmt::debug!("DMA dest addr: {:x}", dst.as_ptr() as usize);

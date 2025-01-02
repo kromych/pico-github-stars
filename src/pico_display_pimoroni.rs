@@ -32,28 +32,27 @@
 
 use crate::lax_dma;
 use core::marker::PhantomData;
-use embedded_graphics::pixelcolor::raw::RawU16;
-use embedded_graphics::pixelcolor::Rgb565;
-use embedded_graphics::prelude::Dimensions;
-use embedded_graphics::prelude::DrawTarget;
-use embedded_graphics::prelude::IntoStorage;
-use embedded_graphics::prelude::OriginDimensions;
-use embedded_graphics::prelude::Point;
-use embedded_graphics::prelude::RawData;
-use embedded_graphics::prelude::RgbColor;
-use embedded_graphics::prelude::Size;
-use embedded_graphics::primitives::Rectangle;
-use embedded_graphics::Pixel;
+use core::usize;
+use cortex_m::asm::delay;
 use embedded_hal::digital::InputPin;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::pwm::SetDutyCycle;
 use embedded_hal::spi::SpiBus;
-use fugit::HertzU32;
+use fugit::RateExtU32;
 use rp2040_hal::dma;
-use rp2040_hal::dma::WriteTarget;
+use rp2040_hal::dma::DMAExt;
+use rp2040_hal::dma::SingleChannel;
 use rp2040_hal::gpio;
+use rp2040_hal::gpio::bank0::*;
+use rp2040_hal::gpio::FunctionSioInput;
+use rp2040_hal::gpio::FunctionSioOutput;
+use rp2040_hal::gpio::Pin;
+use rp2040_hal::gpio::PinId;
+use rp2040_hal::gpio::PullDown;
+use rp2040_hal::gpio::*;
 use rp2040_hal::pwm;
 use rp2040_hal::spi;
+use rp2040_hal::Clock;
 use rp2040_hal::Spi;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -67,12 +66,20 @@ pub enum DisplayError {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
+pub struct Display1_14;
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct DisplaySquare;
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct Display2_0;
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct Display2_8;
+
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum DisplayKind {
-    PicoDisplay1_14,
-    PicoDisplaySquare,
-    PicoDisplay2_0,
-    PicoDisplay2_8,
+    Display1_14,
+    DisplaySquare,
+    Display2_0,
+    Display2_8,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -83,30 +90,90 @@ pub enum DisplayRotation {
     Rotate270,
 }
 
+pub trait DisplayAttributes {
+    fn width() -> u16;
+    fn height() -> u16;
+    fn kind() -> DisplayKind;
+    fn rotation() -> DisplayRotation;
+}
+
+impl DisplayAttributes for Display1_14 {
+    fn width() -> u16 {
+        240
+    }
+
+    fn height() -> u16 {
+        135
+    }
+
+    fn kind() -> DisplayKind {
+        DisplayKind::Display1_14
+    }
+
+    fn rotation() -> DisplayRotation {
+        DisplayRotation::Rotate0
+    }
+}
+
+impl DisplayAttributes for DisplaySquare {
+    fn width() -> u16 {
+        240
+    }
+
+    fn height() -> u16 {
+        240
+    }
+
+    fn kind() -> DisplayKind {
+        DisplayKind::DisplaySquare
+    }
+
+    fn rotation() -> DisplayRotation {
+        DisplayRotation::Rotate0
+    }
+}
+
+impl DisplayAttributes for Display2_0 {
+    fn width() -> u16 {
+        320
+    }
+
+    fn height() -> u16 {
+        240
+    }
+
+    fn kind() -> DisplayKind {
+        DisplayKind::Display2_0
+    }
+
+    fn rotation() -> DisplayRotation {
+        DisplayRotation::Rotate0
+    }
+}
+
+impl DisplayAttributes for Display2_8 {
+    fn width() -> u16 {
+        320
+    }
+
+    fn height() -> u16 {
+        240
+    }
+
+    fn kind() -> DisplayKind {
+        DisplayKind::Display2_8
+    }
+
+    fn rotation() -> DisplayRotation {
+        DisplayRotation::Rotate0
+    }
+}
+
 #[derive(Copy, Clone, PartialEq)]
 pub enum TearingEffect {
     Off,
     Vertical,
     HorizontalAndVertical,
-}
-
-const fn get_display_dimensions(kind: DisplayKind) -> (u16, u16) {
-    match kind {
-        DisplayKind::PicoDisplay1_14 => (240, 135),
-        DisplayKind::PicoDisplaySquare => (240, 240),
-        DisplayKind::PicoDisplay2_0 => (320, 240),
-        DisplayKind::PicoDisplay2_8 => (320, 240),
-    }
-}
-
-impl DisplayKind {
-    pub const fn width(&self) -> u16 {
-        get_display_dimensions(*self).0
-    }
-
-    pub const fn height(&self) -> u16 {
-        get_display_dimensions(*self).1
-    }
 }
 
 const MADCTL_ROW_ORDER: u8 = 0b10000000;
@@ -161,411 +228,541 @@ enum Command {
     GMCTRN1 = 0xE1,
 }
 
-pub struct Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>
+#[derive(Copy, Clone, Debug)]
+pub enum MonochromeColor {
+    Bpp1,
+    Bpp2,
+    Bpp4,
+}
+
+impl MonochromeColor {
+    pub const fn bits_per_pixel(&self) -> u8 {
+        match self {
+            MonochromeColor::Bpp1 => 1,
+            MonochromeColor::Bpp2 => 2,
+            MonochromeColor::Bpp4 => 4,
+        }
+    }
+
+    pub const fn pixel_per_byte(&self) -> u8 {
+        8 / self.bits_per_pixel()
+    }
+}
+
+pub struct MonochromeDisplayBuffer<const N: usize> {
+    width: u16,
+    height: u16,
+    buffer: [u8; N],
+    color: MonochromeColor,
+}
+
+impl<const N: usize> MonochromeDisplayBuffer<N> {
+    pub const fn new(
+        width: u16,
+        height: u16,
+        buffer: [u8; N],
+        color: MonochromeColor,
+    ) -> Result<Self, DisplayError> {
+        if N != (width as usize * height as usize) / color.pixel_per_byte() as usize {
+            Err(DisplayError::FramebufferSizeMismatch)
+        } else {
+            Ok(Self {
+                width,
+                height,
+                buffer,
+                color,
+            })
+        }
+    }
+}
+
+/// A manual SPI implementation for the Pico Display
+pub struct ManualDisplaySpi<MOSI, CLK, CS, DC>
 where
-    DC: gpio::PinId,
-    CS: gpio::PinId,
-    VSYNC: gpio::PinId,
-    SPIDEV: spi::SpiDevice,
-    SPIPINOUT: spi::ValidSpiPinout<SPIDEV>,
-    PWMSLICE: pwm::AnySlice,
-    PWMCHAN: pwm::ChannelId,
-    DMAX: dma::ChannelIndex,
-    DMAY: dma::ChannelIndex,
-    pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
+    MOSI: PinId,
+    CLK: PinId,
+    CS: PinId,
+    DC: PinId,
 {
-    display_kind: DisplayKind,
-    display_rotation: DisplayRotation,
+    mosi: Pin<MOSI, FunctionSioOutput, PullDown>,
+    clk: Pin<CLK, FunctionSioOutput, PullDown>,
+    cs: Pin<CS, FunctionSioOutput, PullDown>,
+    dc: Pin<DC, FunctionSioOutput, PullDown>,
+}
+
+impl<MOSI, CLK, CS, DC> ManualDisplaySpi<MOSI, CLK, CS, DC>
+where
+    MOSI: PinId,
+    CLK: PinId,
+    CS: PinId,
+    DC: PinId,
+{
+    pub fn new(
+        mosi: Pin<MOSI, FunctionSioOutput, PullDown>,
+        clk: Pin<CLK, FunctionSioOutput, PullDown>,
+        cs: Pin<CS, FunctionSioOutput, PullDown>,
+        dc: Pin<DC, FunctionSioOutput, PullDown>,
+    ) -> Self {
+        Self { mosi, clk, cs, dc }
+    }
+
+    #[inline(always)]
+    fn spi_bit(&mut self, bit: bool) {
+        const CYCLES_DELAY: u32 = 4;
+
+        if bit {
+            self.mosi.set_high().unwrap();
+        } else {
+            self.mosi.set_low().unwrap();
+        }
+
+        self.clk.set_high().unwrap();
+        delay(CYCLES_DELAY);
+
+        //let response = self.miso.as_mut().map(|miso| miso.is_high().unwrap());
+
+        self.clk.set_low().unwrap();
+        delay(CYCLES_DELAY);
+    }
+
+    #[inline(always)]
+    fn spi_byte(&mut self, mut byte: u8) {
+        for _ in 0..8 {
+            self.spi_bit((byte & 0x80) != 0);
+            byte <<= 1;
+        }
+    }
+
+    fn write_byte(&mut self, val: u8) {
+        self.cs.set_low().unwrap(); // Chip select active
+        self.spi_byte(val);
+        self.cs.set_high().unwrap(); // Chip select inactive
+    }
+
+    fn write_command(&mut self, cmd: Command) {
+        self.dc.set_low().unwrap(); // Data/Command low for command
+        self.write_byte(cmd as u8);
+    }
+
+    fn write_data(&mut self, val: &[u8]) {
+        for byte in val {
+            self.dc.set_high().unwrap(); // Data/Command high for data
+            self.write_byte(*byte);
+        }
+    }
+
+    fn write_command_with_data(&mut self, cmd: Command, val: &[u8]) {
+        self.write_command(cmd);
+        self.write_data(val);
+    }
+
+    fn release(
+        self,
+    ) -> (
+        Pin<MOSI, FunctionSioOutput, PullDown>,
+        Pin<CLK, FunctionSioOutput, PullDown>,
+        Pin<CS, FunctionSioOutput, PullDown>,
+        Pin<DC, FunctionSioOutput, PullDown>,
+    ) {
+        (self.mosi, self.clk, self.cs, self.dc)
+    }
+}
+
+pub struct Display<TDispAttr>
+where
+    TDispAttr: DisplayAttributes,
+{
+    display_attr: PhantomData<TDispAttr>,
+
+    red_led_pin: Pin<Gpio26, FunctionSioOutput, PullDown>,
+    green_led_pin: Pin<Gpio27, FunctionSioOutput, PullDown>,
+    blue_led_pin: Pin<Gpio28, FunctionSioOutput, PullDown>,
+
+    backlight_pwm: pwm::Channel<pwm::Slice<pwm::Pwm2, pwm::FreeRunning>, pwm::A>,
+
+    dc_pin: Pin<Gpio16, FunctionSioOutput, PullDown>,
+    cs_pin: Pin<Gpio17, FunctionSioOutput, PullDown>,
+    spi_device: Spi<
+        spi::Enabled,
+        rp2040_pac::SPI0,
+        (
+            Pin<Gpio19, FunctionSpi, PullDown>,
+            Pin<Gpio18, FunctionSpi, PullDown>,
+        ),
+    >,
+
+    dma0: u8,
+    dma1: u8,
+
+    vsync_pin: Pin<Gpio21, FunctionSioInput, PullNone>,
+
     width: u16,
     height: u16,
     pixel_count: u32,
-    backlight_pwm: pwm::Channel<PWMSLICE, PWMCHAN>,
-    dc_pin: gpio::Pin<DC, gpio::FunctionSioOutput, gpio::PullDown>,
-    cs_pin: gpio::Pin<CS, gpio::FunctionSioOutput, gpio::PullDown>,
-    vsync_pin: gpio::Pin<VSYNC, gpio::FunctionSioInput, gpio::PullNone>,
-    spi_device: Spi<spi::Enabled, SPIDEV, SPIPINOUT, 8>,
-    dma_channel_x: PhantomData<DMAX>,
-    dma_channel_y: PhantomData<DMAY>,
     sspdr: *mut u32,
     tearing_effect: TearingEffect,
     last_vsync_time: u32,
 }
 
-pub struct DisplayFrame<'a, DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>
+pub type PicoDisplay2_8<'a> = Display<Display2_8>;
+pub type PicoDisplay2_0<'a> = Display<Display2_0>;
+pub type PicoDisplay1_14<'a> = Display<Display1_14>;
+pub type PicoDisplaySquare<'a> = Display<DisplaySquare>;
+
+impl<TDispAttr> Display<TDispAttr>
 where
-    DC: gpio::PinId,
-    CS: gpio::PinId,
-    VSYNC: gpio::PinId,
-    SPIDEV: spi::SpiDevice,
-    SPIPINOUT: spi::ValidSpiPinout<SPIDEV>,
-    PWMSLICE: pwm::AnySlice,
-    PWMCHAN: pwm::ChannelId,
-    DMAX: dma::ChannelIndex,
-    DMAY: dma::ChannelIndex,
-    pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
+    TDispAttr: DisplayAttributes,
 {
-    display: &'a mut Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>,
-    sx: u16,
-    sy: u16,
-    ex: u16,
-    ey: u16,
-    buffer: &'a mut [u16],
-}
+    pub fn new() -> Self {
+        let display_kind = TDispAttr::kind();
+        let mut pac = rp2040_pac::Peripherals::take().unwrap();
+        let core = rp2040_pac::CorePeripherals::take().unwrap();
+        let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
 
-impl<
-        DC: gpio::PinId,
-        CS: gpio::PinId,
-        VSYNC: gpio::PinId,
-        SPIDEV: spi::SpiDevice,
-        SPIPINOUT: spi::ValidSpiPinout<SPIDEV>,
-        PWMSLICE: pwm::AnySlice,
-        PWMCHAN: pwm::ChannelId,
-        DMAX: dma::ChannelIndex,
-        DMAY: dma::ChannelIndex,
-    > DisplayFrame<'_, DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>
-where
-    pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
-{
-    #[inline(always)]
-    pub fn flush(&mut self) {
-        self.display.wait_for_vsync();
-        self.display
-            .write_buffer(self.sx, self.sy, self.ex, self.ey, self.buffer);
-    }
+        let clocks = rp2040_hal::clocks::init_clocks_and_plls(
+            rp_pico::XOSC_CRYSTAL_FREQ,
+            pac.XOSC,
+            pac.CLOCKS,
+            pac.PLL_SYS,
+            pac.PLL_USB,
+            &mut pac.RESETS,
+            &mut watchdog,
+        )
+        .ok()
+        .unwrap();
+        let sspdr = pac.SPI0.sspdr().as_ptr(); // For DMA, we need the address of the register
 
-    #[inline(always)]
-    pub fn render(&mut self, render_func: impl FnOnce(&mut Self)) {
-        render_func(self);
-        self.flush();
-    }
+        let sio = rp2040_hal::sio::Sio::new(pac.SIO);
+        let pins = Pins::new(
+            pac.IO_BANK0,
+            pac.PADS_BANK0,
+            sio.gpio_bank0,
+            &mut pac.RESETS,
+        );
 
-    pub fn copy_raw_data(&mut self, data: &[u16], size: Size, position: Point) {
-        if data.len() != size.width as usize * size.height as usize {
-            return;
-        }
+        let mut red_led_pin: Pin<Gpio26, FunctionSio<SioOutput>, PullDown> =
+            pins.gpio26.into_push_pull_output();
+        let mut green_led_pin: Pin<Gpio27, FunctionSio<SioOutput>, PullDown> =
+            pins.gpio27.into_push_pull_output();
+        let mut blue_led_pin: Pin<Gpio28, FunctionSio<SioOutput>, PullDown> =
+            pins.gpio28.into_push_pull_output();
 
-        // TODO: Check if the rectangle is within the bounds of the display
+        red_led_pin.set_high().unwrap();
+        green_led_pin.set_high().unwrap();
+        blue_led_pin.set_high().unwrap();
 
-        let mut x = position.x;
-        let mut y = position.y;
-        for pixel in data {
-            self.buffer[(y * self.display.width as i32 + x) as usize] = *pixel;
-            x += 1;
+        let backlight_pin = pins.gpio20.into_function::<gpio::FunctionPwm>();
+        let dc_pin = pins.gpio16.into_push_pull_output();
+        let cs_pin = pins.gpio17.into_push_pull_output();
+        let sck_pin = pins.gpio18.into_push_pull_output();
+        let mosi_pin = pins.gpio19.into_push_pull_output();
+        let vsync_pin = pins.gpio21.into_floating_input();
 
-            if x as i32 >= position.x + size.width as i32 {
-                x = position.x;
-                y += 1;
+        let dma = pac.DMA.split(&mut pac.RESETS);
+        //lax_dma::tests::run_dma_tests();
+
+        let pwm_slices = pwm::Slices::new(pac.PWM, &mut pac.RESETS);
+        let mut backlight_pwm = pwm_slices.pwm2;
+        backlight_pwm.set_ph_correct();
+        backlight_pwm.enable();
+        backlight_pwm.channel_a.output_to(backlight_pin);
+        backlight_pwm.channel_a.set_duty_cycle(0).unwrap();
+        let mut backlight_pwm = backlight_pwm.channel_a;
+        backlight_pwm.set_duty_cycle_fully_off().unwrap();
+
+        let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
+
+        let mut display = ManualDisplaySpi::new(mosi_pin, sck_pin, cs_pin, dc_pin);
+
+        // Initialize display hardware
+
+        {
+            display.write_command(Command::SWRESET); // software reset
+
+            delay.delay_ms(150);
+
+            // 0x03: 12-bit/pixel RGB 4-4-4
+            // 0x05: 16-bit/pixel RGB 5-6-5
+            display.write_command_with_data(Command::COLMOD, &[0x03]);
+
+            display.write_command_with_data(Command::PORCTRL, &[0x0c, 0x0c, 0x00, 0x33, 0x33]);
+            display.write_command_with_data(Command::LCMCTRL, &[0x2c]);
+            display.write_command_with_data(Command::VDVVRHEN, &[0x01]);
+            display.write_command_with_data(Command::VRHS, &[0x12]);
+            display.write_command_with_data(Command::VDVS, &[0x20]);
+            display.write_command_with_data(Command::PWCTRL1, &[0xa4, 0xa1]);
+            /*
+               Frame rate:
+               0x00 = 119Hz, 0x10 = 58Hz,
+               0x01 = 111Hz, 0x11 = 57Hz,
+               0x02 = 105Hz, 0x12 = 55Hz,
+               0x03 = 99Hz, 0x13 = 53Hz,
+               0x04 = 94Hz, 0x14 = 52Hz,
+               0x05 = 90Hz, 0x15 = 50Hz,
+               0x06 = 86Hz, 0x16 = 49Hz,
+               0x07 = 82Hz, 0x17 = 48Hz,
+               0x08 = 78Hz, 0x18 = 46Hz,
+               0x09 = 75Hz, 0x19 = 45Hz,
+               0x0A = 72Hz, 0x1A = 44Hz,
+               0x0B = 69Hz, 0x1B = 43Hz,
+               0x0C = 67Hz, 0x1C = 42Hz,
+               0x0D = 64Hz, 0x1D = 41Hz,
+               0x0E = 62Hz, 0x1E = 40Hz,
+               0x0F = 60Hz, 0x1F = 39Hz
+            */
+            display.write_command_with_data(Command::FRCTRL2, &[0x1f]);
+
+            match display_kind {
+                DisplayKind::DisplaySquare => {
+                    display.write_command_with_data(Command::GCTRL, &[0x14]);
+                    display.write_command_with_data(Command::VCOMS, &[0x37]);
+                    display.write_command_with_data(
+                        Command::GMCTRP1,
+                        &[
+                            0xD0, 0x04, 0x0D, 0x11, 0x13, 0x2B, 0x3F, 0x54, 0x4C, 0x18, 0x0D, 0x0B,
+                            0x1F, 0x23,
+                        ],
+                    );
+                    display.write_command_with_data(
+                        Command::GMCTRN1,
+                        &[
+                            0xD0, 0x04, 0x0C, 0x11, 0x13, 0x2C, 0x3F, 0x44, 0x51, 0x2F, 0x1F, 0x1F,
+                            0x20, 0x23,
+                        ],
+                    );
+                }
+
+                DisplayKind::Display2_0 | DisplayKind::Display2_8 => {
+                    display.write_command_with_data(Command::GCTRL, &[0x35]);
+                    display.write_command_with_data(Command::VCOMS, &[0x1f]);
+                    display.write_command_with_data(
+                        Command::GMCTRP1,
+                        &[
+                            0xD0, 0x08, 0x11, 0x08, 0x0C, 0x15, 0x39, 0x33, 0x50, 0x36, 0x13, 0x14,
+                            0x29, 0x2D,
+                        ],
+                    );
+                    display.write_command_with_data(
+                        Command::GMCTRN1,
+                        &[
+                            0xD0, 0x08, 0x10, 0x08, 0x06, 0x06, 0x39, 0x44, 0x51, 0x0B, 0x16, 0x14,
+                            0x2F, 0x31,
+                        ],
+                    );
+                }
+
+                DisplayKind::Display1_14 => {
+                    display.write_command_with_data(Command::VRHS, &[0x00]); // VRH Voltage setting
+                    display.write_command_with_data(Command::GCTRL, &[0x75]); // VGH and VGL voltages
+                    display.write_command_with_data(Command::VCOMS, &[0x3D]); // VCOM voltage
+                    display.write_command_with_data(Command::_D6, &[0xa1]); // ???
+                    display.write_command_with_data(
+                        Command::GMCTRP1,
+                        &[
+                            0x70, 0x04, 0x08, 0x09, 0x09, 0x05, 0x2A, 0x33, 0x41, 0x07, 0x13, 0x13,
+                            0x29, 0x2f,
+                        ],
+                    );
+                    display.write_command_with_data(
+                        Command::GMCTRN1,
+                        &[
+                            0x70, 0x03, 0x09, 0x0A, 0x09, 0x06, 0x2B, 0x34, 0x41, 0x07, 0x12, 0x14,
+                            0x28, 0x2E,
+                        ],
+                    );
+                }
             }
-        }
-    }
-}
 
-impl<
-        DC: gpio::PinId,
-        CS: gpio::PinId,
-        VSYNC: gpio::PinId,
-        SPIDEV: spi::SpiDevice,
-        SPIPINOUT: spi::ValidSpiPinout<SPIDEV>,
-        PWMSLICE: pwm::AnySlice,
-        PWMCHAN: pwm::ChannelId,
-        DMAX: dma::ChannelIndex,
-        DMAY: dma::ChannelIndex,
-    > Display<DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>
-where
-    pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
-{
-    #[allow(clippy::too_many_arguments)]
-    pub fn new<F, B>(
-        display_kind: DisplayKind,
-        display_rotation: DisplayRotation,
-        backlight_pwm: pwm::Channel<PWMSLICE, PWMCHAN>,
-        dc_pin: gpio::Pin<DC, gpio::FunctionSioOutput, gpio::PullDown>,
-        cs_pin: gpio::Pin<CS, gpio::FunctionSioOutput, gpio::PullDown>,
-        vsync_pin: gpio::Pin<VSYNC, gpio::FunctionSioInput, gpio::PullNone>,
-        spi_device: SPIDEV,
-        spi_pinout: SPIPINOUT,
-        _dma_channel_x: dma::Channel<DMAX>,
-        _dma_channel_y: dma::Channel<DMAY>,
-        delay_source: &mut cortex_m::delay::Delay,
-        resets: &mut rp2040_pac::RESETS,
-        peri_frequency: F,
-        baudrate: B,
-    ) -> Self
-    where
-        F: Into<HertzU32>,
-        B: Into<HertzU32>,
-    {
-        let sspdr = spi_device.sspdr().as_ptr(); // For DMA
-        let spi_device = Spi::<_, _, _, 8>::new(spi_device, spi_pinout);
+            display.write_command(Command::INVON); // set inversion mode
+            delay.delay_ms(10);
+            display.write_command(Command::SLPOUT); // leave sleep mode
+            delay.delay_ms(10);
+            display.write_command(Command::NORON); // leave sleep mode
+            delay.delay_ms(10);
+            display.write_command(Command::DISPON); // turn display on
+            delay.delay_ms(10);
+        }
+
+        // Configure display
+
+        {
+            let round = false;
+            let rotation = TDispAttr::rotation();
+            let (mut width, mut height) = (TDispAttr::width(), TDispAttr::height());
+
+            if rotation == DisplayRotation::Rotate90 || rotation == DisplayRotation::Rotate270 {
+                core::mem::swap(&mut width, &mut height);
+            }
+
+            let mut caset = [0u16; 2];
+            let mut raset = [0u16; 2];
+            let mut madctl: u8 = 0;
+
+            // 240x240 Square and Round LCD Breakouts
+            if width == 240 && height == 240 {
+                let mut row_offset = if round { 40 } else { 80 };
+                let col_offset = 0;
+
+                match rotation {
+                    DisplayRotation::Rotate90 => {
+                        if !round {
+                            row_offset = 0;
+                        }
+                        caset[0] = row_offset;
+                        caset[1] = width + row_offset - 1;
+                        raset[0] = col_offset;
+                        raset[1] = width + col_offset - 1;
+
+                        madctl = MADCTL_HORIZ_ORDER | MADCTL_COL_ORDER | MADCTL_SWAP_XY;
+                    }
+                    DisplayRotation::Rotate180 => {
+                        caset[0] = col_offset;
+                        caset[1] = width + col_offset - 1;
+                        raset[0] = row_offset;
+                        raset[1] = width + row_offset - 1;
+
+                        madctl = MADCTL_HORIZ_ORDER | MADCTL_COL_ORDER | MADCTL_ROW_ORDER;
+                    }
+                    DisplayRotation::Rotate270 => {
+                        caset[0] = row_offset;
+                        caset[1] = width + row_offset - 1;
+                        raset[0] = col_offset;
+                        raset[1] = width + col_offset - 1;
+
+                        madctl = MADCTL_ROW_ORDER | MADCTL_SWAP_XY;
+                    }
+                    _ => {
+                        // Default to Rotate0
+                        if !round {
+                            row_offset = 0;
+                        }
+                        caset[0] = col_offset;
+                        caset[1] = width + col_offset - 1;
+                        raset[0] = row_offset;
+                        raset[1] = width + row_offset - 1;
+
+                        madctl = MADCTL_HORIZ_ORDER;
+                    }
+                }
+            }
+            // Pico Display
+            else if width == 240 && height == 135 {
+                caset[0] = 40; // 240 columns
+                caset[1] = 40 + width - 1;
+                raset[0] = 52; // 135 rows
+                raset[1] = 52 + height - 1;
+
+                if rotation == DisplayRotation::Rotate0 {
+                    raset[0] += 1;
+                    raset[1] += 1;
+                }
+
+                madctl = if rotation == DisplayRotation::Rotate180 {
+                    MADCTL_ROW_ORDER
+                } else {
+                    MADCTL_COL_ORDER
+                };
+                madctl |= MADCTL_SWAP_XY | MADCTL_SCAN_ORDER;
+            }
+            // Pico Display at 90 degree rotation
+            else if width == 135 && height == 240 {
+                caset[0] = 52; // 135 columns
+                caset[1] = 52 + width - 1;
+                raset[0] = 40; // 240 rows
+                raset[1] = 40 + height - 1;
+
+                madctl = if rotation == DisplayRotation::Rotate90 {
+                    caset[0] += 1;
+                    caset[1] += 1;
+                    MADCTL_COL_ORDER | MADCTL_ROW_ORDER
+                } else {
+                    0
+                };
+            }
+            // Pico Display 2.0 and 2.8
+            else if width == 320 && height == 240 {
+                caset[0] = 0;
+                caset[1] = 319;
+                raset[0] = 0;
+                raset[1] = 239;
+
+                madctl = if rotation == DisplayRotation::Rotate180
+                    || rotation == DisplayRotation::Rotate90
+                {
+                    MADCTL_ROW_ORDER
+                } else {
+                    MADCTL_COL_ORDER
+                };
+                madctl |= MADCTL_SWAP_XY | MADCTL_SCAN_ORDER;
+            }
+            // Pico Display 2.0 at 90 degree rotation
+            else if width == 240 && height == 320 {
+                caset[0] = 0;
+                caset[1] = 239;
+                raset[0] = 0;
+                raset[1] = 319;
+
+                madctl = if rotation == DisplayRotation::Rotate180
+                    || rotation == DisplayRotation::Rotate90
+                {
+                    MADCTL_COL_ORDER | MADCTL_ROW_ORDER
+                } else {
+                    0
+                };
+            }
+
+            display.write_command(Command::CASET);
+            display.write_data(&caset[0].to_be_bytes());
+            display.write_data(&caset[1].to_be_bytes());
+            display.write_command(Command::RASET);
+            display.write_data(&raset[0].to_be_bytes());
+            display.write_data(&raset[1].to_be_bytes());
+
+            display.write_command(Command::MADCTL);
+            display.write_data(&[madctl]);
+        }
+
+        let (mosi_pin, sck_pin, cs_pin, dc_pin) = display.release();
+
+        // Serious SPI speed
+
+        let sck_pin = sck_pin.into_function::<gpio::FunctionSpi>();
+        let mosi_pin = mosi_pin.into_function::<gpio::FunctionSpi>();
+
+        let spi_device = Spi::<_, _, _, 8>::new(pac.SPI0, (mosi_pin, sck_pin));
         let spi_device = spi_device.init(
-            resets,
-            peri_frequency.into(),
-            baudrate.into(),
+            &mut pac.RESETS,
+            clocks.peripheral_clock.freq(),
+            62_500_u32.kHz(),
             embedded_hal::spi::MODE_0,
         );
-        let (width, height) = get_display_dimensions(display_kind);
-        let mut display = Self {
+
+        let mut display = Display {
+            display_attr: PhantomData,
+            width: TDispAttr::width(),
+            height: TDispAttr::height(),
+            pixel_count: TDispAttr::width() as u32 * TDispAttr::height() as u32,
+            sspdr,
+            tearing_effect: TearingEffect::Off,
+            last_vsync_time: 0,
+            red_led_pin,
+            green_led_pin,
+            blue_led_pin,
             backlight_pwm,
             dc_pin,
             cs_pin,
             vsync_pin,
             spi_device,
-            sspdr,
-            dma_channel_x: PhantomData,
-            dma_channel_y: PhantomData,
-            last_vsync_time: 0,
-            display_kind,
-            display_rotation,
-            width,
-            height,
-            pixel_count: width as u32 * height as u32,
-            tearing_effect: TearingEffect::Off,
+            dma0: dma.ch0.id(),
+            dma1: dma.ch1.id(),
         };
 
-        display.no_backlight();
-        display.write_command(Command::SWRESET); // software reset
-
-        delay_source.delay_ms(150);
-
-        display.write_command_with_data(Command::COLMOD, &[0x55]); // 16 bits per pixel, RGB565
-
-        display.write_command_with_data(Command::PORCTRL, &[0x0c, 0x0c, 0x00, 0x33, 0x33]);
-        display.write_command_with_data(Command::LCMCTRL, &[0x2c]);
-        display.write_command_with_data(Command::VDVVRHEN, &[0x01]);
-        display.write_command_with_data(Command::VRHS, &[0x12]);
-        display.write_command_with_data(Command::VDVS, &[0x20]);
-        display.write_command_with_data(Command::PWCTRL1, &[0xa4, 0xa1]);
-        /*
-           Frame rate:
-           0x00 = 119Hz, 0x10 = 58Hz,
-           0x01 = 111Hz, 0x11 = 57Hz,
-           0x02 = 105Hz, 0x12 = 55Hz,
-           0x03 = 99Hz, 0x13 = 53Hz,
-           0x04 = 94Hz, 0x14 = 52Hz,
-           0x05 = 90Hz, 0x15 = 50Hz,
-           0x06 = 86Hz, 0x16 = 49Hz,
-           0x07 = 82Hz, 0x17 = 48Hz,
-           0x08 = 78Hz, 0x18 = 46Hz,
-           0x09 = 75Hz, 0x19 = 45Hz,
-           0x0A = 72Hz, 0x1A = 44Hz,
-           0x0B = 69Hz, 0x1B = 43Hz,
-           0x0C = 67Hz, 0x1C = 42Hz,
-           0x0D = 64Hz, 0x1D = 41Hz,
-           0x0E = 62Hz, 0x1E = 40Hz,
-           0x0F = 60Hz, 0x1F = 39Hz
-        */
-        display.write_command_with_data(Command::FRCTRL2, &[0x1f]);
-
-        match display.display_kind {
-            DisplayKind::PicoDisplaySquare => {
-                display.write_command_with_data(Command::GCTRL, &[0x14]);
-                display.write_command_with_data(Command::VCOMS, &[0x37]);
-                display.write_command_with_data(
-                    Command::GMCTRP1,
-                    &[
-                        0xD0, 0x04, 0x0D, 0x11, 0x13, 0x2B, 0x3F, 0x54, 0x4C, 0x18, 0x0D, 0x0B,
-                        0x1F, 0x23,
-                    ],
-                );
-                display.write_command_with_data(
-                    Command::GMCTRN1,
-                    &[
-                        0xD0, 0x04, 0x0C, 0x11, 0x13, 0x2C, 0x3F, 0x44, 0x51, 0x2F, 0x1F, 0x1F,
-                        0x20, 0x23,
-                    ],
-                );
-            }
-
-            DisplayKind::PicoDisplay2_0 | DisplayKind::PicoDisplay2_8 => {
-                display.write_command_with_data(Command::GCTRL, &[0x35]);
-                display.write_command_with_data(Command::VCOMS, &[0x1f]);
-                display.write_command_with_data(
-                    Command::GMCTRP1,
-                    &[
-                        0xD0, 0x08, 0x11, 0x08, 0x0C, 0x15, 0x39, 0x33, 0x50, 0x36, 0x13, 0x14,
-                        0x29, 0x2D,
-                    ],
-                );
-                display.write_command_with_data(
-                    Command::GMCTRN1,
-                    &[
-                        0xD0, 0x08, 0x10, 0x08, 0x06, 0x06, 0x39, 0x44, 0x51, 0x0B, 0x16, 0x14,
-                        0x2F, 0x31,
-                    ],
-                );
-            }
-
-            DisplayKind::PicoDisplay1_14 => {
-                display.write_command_with_data(Command::VRHS, &[0x00]); // VRH Voltage setting
-                display.write_command_with_data(Command::GCTRL, &[0x75]); // VGH and VGL voltages
-                display.write_command_with_data(Command::VCOMS, &[0x3D]); // VCOM voltage
-                display.write_command_with_data(Command::_D6, &[0xa1]); // ???
-                display.write_command_with_data(
-                    Command::GMCTRP1,
-                    &[
-                        0x70, 0x04, 0x08, 0x09, 0x09, 0x05, 0x2A, 0x33, 0x41, 0x07, 0x13, 0x13,
-                        0x29, 0x2f,
-                    ],
-                );
-                display.write_command_with_data(
-                    Command::GMCTRN1,
-                    &[
-                        0x70, 0x03, 0x09, 0x0A, 0x09, 0x06, 0x2B, 0x34, 0x41, 0x07, 0x12, 0x14,
-                        0x28, 0x2E,
-                    ],
-                );
-            }
-        }
-
-        display.write_command(Command::INVON); // set inversion mode
-        delay_source.delay_ms(10);
-        display.write_command(Command::SLPOUT); // leave sleep mode
-        delay_source.delay_ms(10);
-        display.write_command(Command::NORON); // leave sleep mode
-        delay_source.delay_ms(10);
-        display.write_command(Command::DISPON); // turn display on
-        delay_source.delay_ms(10);
-
-        display.configure_display();
         display.set_tearing_effect(TearingEffect::HorizontalAndVertical);
 
         display.set_backlight(40);
-        delay_source.delay_ms(10);
+        delay.delay_ms(10);
 
         display
-    }
-
-    fn configure_display(&mut self) {
-        let round = false;
-        let kind = self.display_kind;
-        let rotation = self.display_rotation;
-        let (mut width, mut height) = get_display_dimensions(kind);
-
-        if rotation == DisplayRotation::Rotate90 || rotation == DisplayRotation::Rotate270 {
-            core::mem::swap(&mut width, &mut height);
-        }
-
-        let mut caset = [0u16; 2];
-        let mut raset = [0u16; 2];
-        let mut madctl: u8 = 0;
-
-        // 240x240 Square and Round LCD Breakouts
-        if width == 240 && height == 240 {
-            let mut row_offset = if round { 40 } else { 80 };
-            let col_offset = 0;
-
-            match rotation {
-                DisplayRotation::Rotate90 => {
-                    if !round {
-                        row_offset = 0;
-                    }
-                    caset[0] = row_offset;
-                    caset[1] = width + row_offset - 1;
-                    raset[0] = col_offset;
-                    raset[1] = width + col_offset - 1;
-
-                    madctl = MADCTL_HORIZ_ORDER | MADCTL_COL_ORDER | MADCTL_SWAP_XY;
-                }
-                DisplayRotation::Rotate180 => {
-                    caset[0] = col_offset;
-                    caset[1] = width + col_offset - 1;
-                    raset[0] = row_offset;
-                    raset[1] = width + row_offset - 1;
-
-                    madctl = MADCTL_HORIZ_ORDER | MADCTL_COL_ORDER | MADCTL_ROW_ORDER;
-                }
-                DisplayRotation::Rotate270 => {
-                    caset[0] = row_offset;
-                    caset[1] = width + row_offset - 1;
-                    raset[0] = col_offset;
-                    raset[1] = width + col_offset - 1;
-
-                    madctl = MADCTL_ROW_ORDER | MADCTL_SWAP_XY;
-                }
-                _ => {
-                    // Default to Rotate0
-                    if !round {
-                        row_offset = 0;
-                    }
-                    caset[0] = col_offset;
-                    caset[1] = width + col_offset - 1;
-                    raset[0] = row_offset;
-                    raset[1] = width + row_offset - 1;
-
-                    madctl = MADCTL_HORIZ_ORDER;
-                }
-            }
-        }
-        // Pico Display
-        else if width == 240 && height == 135 {
-            caset[0] = 40; // 240 columns
-            caset[1] = 40 + width - 1;
-            raset[0] = 52; // 135 rows
-            raset[1] = 52 + height - 1;
-
-            if rotation == DisplayRotation::Rotate0 {
-                raset[0] += 1;
-                raset[1] += 1;
-            }
-
-            madctl = if rotation == DisplayRotation::Rotate180 {
-                MADCTL_ROW_ORDER
-            } else {
-                MADCTL_COL_ORDER
-            };
-            madctl |= MADCTL_SWAP_XY | MADCTL_SCAN_ORDER;
-        }
-        // Pico Display at 90 degree rotation
-        else if width == 135 && height == 240 {
-            caset[0] = 52; // 135 columns
-            caset[1] = 52 + width - 1;
-            raset[0] = 40; // 240 rows
-            raset[1] = 40 + height - 1;
-
-            madctl = if rotation == DisplayRotation::Rotate90 {
-                caset[0] += 1;
-                caset[1] += 1;
-                MADCTL_COL_ORDER | MADCTL_ROW_ORDER
-            } else {
-                0
-            };
-        }
-        // Pico Display 2.0 and 2.8
-        else if width == 320 && height == 240 {
-            caset[0] = 0;
-            caset[1] = 319;
-            raset[0] = 0;
-            raset[1] = 239;
-
-            madctl = if rotation == DisplayRotation::Rotate180
-                || rotation == DisplayRotation::Rotate90
-            {
-                MADCTL_ROW_ORDER
-            } else {
-                MADCTL_COL_ORDER
-            };
-            madctl |= MADCTL_SWAP_XY | MADCTL_SCAN_ORDER;
-        }
-        // Pico Display 2.0 at 90 degree rotation
-        else if width == 240 && height == 320 {
-            caset[0] = 0;
-            caset[1] = 239;
-            raset[0] = 0;
-            raset[1] = 319;
-
-            madctl = if rotation == DisplayRotation::Rotate180
-                || rotation == DisplayRotation::Rotate90
-            {
-                MADCTL_COL_ORDER | MADCTL_ROW_ORDER
-            } else {
-                0
-            };
-        }
-
-        self.set_address_window(caset[0], raset[0], caset[1], raset[1]);
-
-        self.write_command(Command::MADCTL);
-        self.write_data(&[madctl]);
     }
 
     #[inline(always)]
@@ -607,10 +804,8 @@ where
         self.write_data(&ey.to_be_bytes());
     }
 
-    fn write_buffer(&mut self, sx: u16, sy: u16, ex: u16, ey: u16, buffer: &[u16]) {
-        let tx_req = Spi::<spi::Enabled, SPIDEV, SPIPINOUT>::tx_treq()
-            .unwrap()
-            .into(); // TODO: Handle error, check ranges
+    pub fn flush<'a>(&mut self, buffer: &'a mut [u16], sx: u16, sy: u16, ex: u16, ey: u16) {
+        let tx_req = lax_dma::TxReq::Spi0Tx;
         let dma_config = lax_dma::Config {
             word_size: lax_dma::TxSize::_8bit,
             source: lax_dma::Source {
@@ -621,7 +816,7 @@ where
                 address: self.sspdr.cast(),
                 increment: false,
             },
-            tx_count: 2 * (ex - sx + 1) as u32 * (ey - sy + 1) as u32,
+            tx_count: 2 * buffer.len() as u32,
             tx_req,
             byte_swap: false,
             start: true,
@@ -633,7 +828,7 @@ where
         self.dc_pin.set_high().unwrap();
         self.cs_pin.set_low().unwrap();
 
-        let dma: lax_dma::LaxDmaWrite<DMAY> = lax_dma::LaxDmaWrite::new(dma_config);
+        let dma = lax_dma::LaxDmaWrite::new::<dma::CH0>(dma_config);
         //dma.trigger();
         dma.wait();
 
@@ -685,176 +880,5 @@ where
         while self.vsync_pin.is_high().unwrap() {}
         // while self.vsync_pin.is_low().unwrap() {}
         // self.last_vsync_time = crate::time::time_us();
-    }
-
-    pub fn frame<'a>(
-        &'a mut self,
-        sx: u16,
-        sy: u16,
-        ex: u16,
-        ey: u16,
-        buffer: &'a mut [u16],
-    ) -> Result<
-        DisplayFrame<'a, DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>,
-        DisplayError,
-    > {
-        if sx >= ex || sy >= ey {
-            return Err(DisplayError::BufferRectSizeMismatch);
-        }
-
-        let width = ex - sx + 1;
-        let height = ey - sy + 1;
-        if buffer.len() != width as usize * height as usize {
-            return Err(DisplayError::BufferSizeMismatch);
-        }
-        if width > self.width || height > self.height {
-            return Err(DisplayError::FramebufferSizeMismatch);
-        }
-        Ok(DisplayFrame {
-            display: self,
-            sx,
-            sy,
-            ex,
-            ey,
-            buffer,
-        })
-    }
-
-    pub fn whole_screen<'a>(
-        &'a mut self,
-        buffer: &'a mut [u16],
-    ) -> Result<
-        DisplayFrame<'a, DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>,
-        DisplayError,
-    > {
-        self.frame(0, 0, self.width - 1, self.height - 1, buffer)
-    }
-}
-
-impl<
-        DC: gpio::PinId,
-        CS: gpio::PinId,
-        VSYNC: gpio::PinId,
-        SPIDEV: spi::SpiDevice,
-        SPIPINOUT: spi::ValidSpiPinout<SPIDEV>,
-        PWMSLICE: pwm::AnySlice,
-        PWMCHAN: pwm::ChannelId,
-        DMAX: dma::ChannelIndex,
-        DMAY: dma::ChannelIndex,
-    > OriginDimensions
-    for DisplayFrame<'_, DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>
-where
-    pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
-{
-    fn size(&self) -> Size {
-        Size::new(
-            (self.ex - self.sx + 1) as u32,
-            (self.ey - self.sy + 1) as u32,
-        )
-    }
-}
-
-impl<
-        DC: gpio::PinId,
-        CS: gpio::PinId,
-        VSYNC: gpio::PinId,
-        SPIDEV: spi::SpiDevice,
-        SPIPINOUT: spi::ValidSpiPinout<SPIDEV>,
-        PWMSLICE: pwm::AnySlice,
-        PWMCHAN: pwm::ChannelId,
-        DMAX: dma::ChannelIndex,
-        DMAY: dma::ChannelIndex,
-    > DrawTarget
-    for DisplayFrame<'_, DC, CS, VSYNC, SPIDEV, SPIPINOUT, PWMSLICE, PWMCHAN, DMAX, DMAY>
-where
-    pwm::Channel<PWMSLICE, PWMCHAN>: SetDutyCycle,
-{
-    type Color = Rgb565;
-    type Error = DisplayError;
-
-    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
-    where
-        I: IntoIterator<Item = Pixel<Self::Color>>,
-    {
-        for Pixel(coord, color) in pixels.into_iter() {
-            let Point { x, y } = coord;
-            let index: u32 = x as u32 + y as u32 * self.size().width;
-            let color = RawU16::from(color).into_inner();
-            self.buffer[index as usize] = color.to_be();
-        }
-        Ok(())
-    }
-
-    fn fill_contiguous<I>(&mut self, area: &Rectangle, colors: I) -> Result<(), Self::Error>
-    where
-        I: IntoIterator<Item = Self::Color>,
-    {
-        let clipped_area = area.intersection(&self.bounding_box());
-        if area.bottom_right().is_none() || clipped_area.bottom_right().is_none() {
-            return Ok(());
-        }
-
-        let skip_top_left = clipped_area.top_left - area.top_left;
-        let skip_bottom_right = area.bottom_right().unwrap() - clipped_area.bottom_right().unwrap();
-
-        let mut colors = colors.into_iter();
-
-        for _ in 0..skip_top_left.y {
-            for _ in 0..area.size.width {
-                colors.next();
-            }
-        }
-
-        for y in 0..clipped_area.size.height as i32 {
-            for _ in 0..skip_top_left.x {
-                colors.next();
-            }
-
-            let mut index =
-                clipped_area.top_left.x + (clipped_area.top_left.y + y) * self.size().width as i32;
-            for _ in 0..clipped_area.size.width {
-                let color = colors.next().unwrap_or(Rgb565::RED);
-                let color = RawU16::from(color).into_inner();
-                self.buffer[index as usize] = color.to_be();
-                index += 1;
-            }
-
-            for _ in 0..skip_bottom_right.x {
-                colors.next();
-            }
-        }
-
-        Ok(())
-    }
-
-    fn clear(&mut self, color: Self::Color) -> Result<(), Self::Error> {
-        static mut SOURCE: [u16; 1] = [0];
-        unsafe { SOURCE[0] = color.into_storage() };
-
-        let dma_config = lax_dma::Config {
-            word_size: lax_dma::TxSize::_16bit,
-            source: lax_dma::Source {
-                address: unsafe { SOURCE.as_ptr().cast() },
-                increment: false,
-            },
-            destination: lax_dma::Destination {
-                address: self.buffer.as_mut_ptr().cast(),
-                increment: true,
-            },
-            tx_count: self.size().width * self.size().height,
-            tx_req: lax_dma::TxReq::Permanent,
-            byte_swap: false,
-            start: true,
-        };
-
-        let dma: lax_dma::LaxDmaWrite<DMAX> = lax_dma::LaxDmaWrite::new(dma_config);
-        //dma.trigger();
-        dma.wait();
-
-        Ok(())
-    }
-
-    fn fill_solid(&mut self, area: &Rectangle, color: Self::Color) -> Result<(), Self::Error> {
-        self.fill_contiguous(area, core::iter::repeat(color))
     }
 }
