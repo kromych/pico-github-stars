@@ -10,7 +10,7 @@ bitfield-struct = "0.10"
 defmt = "0.3"
 defmt-rtt = "0.4"
 panic-probe = { version = "0.3", features = ["print-defmt"] }
-portable-atomic = { version = "1.10", features = ["critical-section"] }
+portable-atomic = {version = "1.7.0", features = ["critical-section"]}
 
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
@@ -18,9 +18,8 @@ embedded-hal = "1.0"
 fugit = "0.3"
 pio = "0.2"
 pio-proc = "0.2"
-rp-pico = "0.9"
 rp2040-boot2 = "0.3"
-rp2040-hal = "0.10"
+rp2040-hal = { version = "0.11", features = ["binary-info", "critical-section-impl", "rt", "defmt"] }
 rp2040-pac = "0.6"
 embedded-graphics = "0.8"
 libm = "0.2"

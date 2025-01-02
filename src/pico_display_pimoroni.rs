@@ -416,7 +416,7 @@ where
     TDispAttr: DisplayAttributes,
 {
     pub fn new() -> Self {
-        crate::lax_dma::tests::test_with_pio();
+        crate::lax_dma::tests::test_with_pio_invert();
         todo!("Implement the Display::new method");
 
         let display_kind = TDispAttr::kind();
@@ -425,7 +425,7 @@ where
         let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
 
         let clocks = rp2040_hal::clocks::init_clocks_and_plls(
-            rp_pico::XOSC_CRYSTAL_FREQ,
+            crate::XOSC_CRYSTAL_FREQ,
             pac.XOSC,
             pac.CLOCKS,
             pac.PLL_SYS,

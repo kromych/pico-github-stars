@@ -12,6 +12,26 @@ mod lax_dma;
 mod pico_display_pimoroni;
 mod rng;
 
+const XOSC_CRYSTAL_FREQ: u32 = 12_000_000;
+
+/// The linker will place this boot block at the start of our program image. We
+/// need this to help the ROM bootloader get our code up and running.
+/// Note: This boot block is not necessary when using a rp-hal based BSP
+/// as the BSPs already perform this step.
+#[link_section = ".boot2"]
+#[used]
+pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
+
+/// Program metadata for `picotool info`
+#[link_section = ".bi_entries"]
+#[used]
+pub static PICOTOOL_ENTRIES: [rp2040_hal::binary_info::EntryAddr; 4] = [
+    rp2040_hal::binary_info::rp_program_name!(c"PicoDisplay"),
+    rp2040_hal::binary_info::rp_program_description!(c"PicoDisplay experiments"),
+    rp2040_hal::binary_info::rp_program_build_attribute!(),
+    rp2040_hal::binary_info::rp_cargo_version!(),
+];
+
 #[allow(dead_code)]
 mod time {
     pub fn time_us() -> u32 {
@@ -32,7 +52,7 @@ const DISPLAY_COLOR: MonochromeColor = MonochromeColor::Bpp1;
 const DISPLAY_BUFFER_SIZE: usize =
     (DISPLAY_WIDTH as usize) * (DISPLAY_HEIGHT as usize) / DISPLAY_COLOR.pixel_per_byte() as usize;
 
-#[rp_pico::entry]
+#[rp2040_hal::entry]
 fn main() -> ! {
     defmt::info!(
         "Board {}, git revision {:x}, ROM verion {:x}, time {:x} us",

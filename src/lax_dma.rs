@@ -243,7 +243,6 @@ pub mod tests {
     use crate::lax_dma::Source;
     use crate::lax_dma::TxReq;
     use crate::lax_dma::TxSize;
-    use cortex_m::asm::delay;
     use rp2040_hal::dma;
     use rp2040_hal::dma::DMAExt;
     use rp2040_hal::pio::PIOExt;
@@ -469,7 +468,7 @@ pub mod tests {
         }
     }
 
-    pub fn test_with_pio() {
+    pub fn test_with_pio_invert() {
         // | DMA Channel | Source (Read Address)      | Destination (Write Address) | FIFO Connection           | Shift Register              |
         // |-------------|----------------------------|-----------------------------|---------------------------|-----------------------------|
         // | DMA 1 (TX)  | RAM Buffer                 | PIO TX FIFO (PIO0_TXF_SM0)  | TX FIFO feeds OSR         | OSR (Output Shift Register) |
@@ -479,16 +478,13 @@ pub mod tests {
         let input_buffer = [0x55u8; SIZE];
         let mut output_buffer = [0u8; SIZE];
 
-        defmt::info!("input_buffer: {:?}", input_buffer);
-        defmt::info!("output_buffer: {:?}", output_buffer);
-
         const STATE_MACHINE: usize = 0;
 
         let mut pac = rp2040_pac::Peripherals::take().unwrap();
         let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
 
         let _clocks = rp2040_hal::clocks::init_clocks_and_plls(
-            rp_pico::XOSC_CRYSTAL_FREQ,
+            crate::XOSC_CRYSTAL_FREQ,
             pac.XOSC,
             pac.CLOCKS,
             pac.PLL_SYS,
@@ -501,49 +497,58 @@ pub mod tests {
 
         let invert_pio = pio_proc::pio_asm!(
             ".wrap_target",
-            "out x, 32",
-            "mov x, ~x",
-            "mov isr, x",
-            "push",
+            "pull",       // PIO TX FIFO -> OSR (no need if `autopull` is true)
+            "mov x, osr", // OSR -> x (same as `out x, 32` for shifting 32 bits from OSR)
+            "mov x, ~x",  // ~x -> x (bitwise invert)
+            "mov isr, x", // x -> ISR (same as `in x, 32` as shifting 32 bits into ISR)
+            "push",       // ISR -> PIO TX FIFO (no need if `autopush` is true)
             ".wrap"
         );
 
+        // Reset DMA
         let _dma = pac.DMA.split(&mut pac.RESETS);
+        // Reset PIO
         let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
-        let installed_pio = pio.install(&invert_pio.program).unwrap();
-        let (mut sm0, _, _) =
-            rp2040_hal::pio::PIOBuilder::from_installed_program(installed_pio).build(sm0);
-        let sm0_running = sm0.start();
 
-        let txf = unsafe { (*rp2040_pac::PIO0::PTR).txf(STATE_MACHINE) };
-        let rxf = unsafe { (*rp2040_pac::PIO0::PTR).rxf(STATE_MACHINE) };
+        let installed_pio = pio.install(&invert_pio.program).unwrap();
+        let (sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed_pio)
+            .autopull(false)
+            .autopush(false)
+            .build(sm0);
+        sm.start();
+
+        let txf = tx.fifo_address();
+        let rxf = rx.fifo_address();
+
+        defmt::info!("input_buffer: {:?}", input_buffer);
+        defmt::info!("output_buffer: {:?}", output_buffer);
 
         let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
-            word_size: TxSize::_8bit,
+            word_size: TxSize::_32bit,
             source: Source {
                 address: input_buffer.as_ptr(),
                 increment: true,
             },
             destination: Destination {
-                address: txf.as_ptr().cast(),
+                address: txf.cast_mut().cast(),
                 increment: false,
             },
-            tx_count: SIZE as u32,
+            tx_count: SIZE as u32 / 4,
             tx_req: TxReq::Pio0Tx0,
             byte_swap: false,
             start: false,
         });
         let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
-            word_size: TxSize::_8bit,
+            word_size: TxSize::_32bit,
             source: Source {
-                address: rxf.as_ptr().cast(),
+                address: rxf.cast(),
                 increment: false,
             },
             destination: Destination {
                 address: output_buffer.as_mut_ptr(),
                 increment: true,
             },
-            tx_count: SIZE as u32,
+            tx_count: SIZE as u32 / 4,
             tx_req: TxReq::Pio0Rx0,
             byte_swap: false,
             start: false,
@@ -552,10 +557,6 @@ pub mod tests {
         // Start the DMA transfers
         dma1.trigger();
         dma2.trigger();
-
-        delay(100);
-        defmt::info!("input_buffer: {:?}", input_buffer);
-        defmt::info!("output_buffer: {:?}", output_buffer);
 
         // Wait for the DMA transfers to complete
         dma1.wait();
