@@ -231,10 +231,11 @@ enum Command {
 }
 
 #[derive(Copy, Clone, Debug)]
+#[repr(u8)]
 pub enum MonochromeColor {
-    Bpp1,
-    Bpp2,
-    Bpp4,
+    Bpp1 = 1,
+    Bpp2 = 2,
+    Bpp4 = 4,
 }
 
 impl MonochromeColor {
@@ -416,7 +417,7 @@ where
     TDispAttr: DisplayAttributes,
 {
     pub fn new() -> Self {
-        crate::lax_dma::tests::test_with_pio_expand_3times();
+        crate::lax_dma::tests::test_with_pio_expand_dynamic(MonochromeColor::Bpp1);
         todo!("Implement the Display::new method");
 
         let display_kind = TDispAttr::kind();

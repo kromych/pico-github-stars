@@ -243,6 +243,7 @@ pub mod tests {
     use crate::lax_dma::Source;
     use crate::lax_dma::TxReq;
     use crate::lax_dma::TxSize;
+    use crate::pico_display_pimoroni::MonochromeColor;
     use rp2040_hal::dma;
     use rp2040_hal::dma::DMAExt;
     use rp2040_hal::pio::PIOExt;
@@ -664,114 +665,43 @@ pub mod tests {
         defmt::info!("output_buffer: {:08b}", output_buffer);
     }
 
-    pub fn test_with_pio_expand_6times() {
-        // | DMA Channel | Source (Read Address)      | Destination (Write Address) | FIFO Connection           | Shift Register              |
-        // |-------------|----------------------------|-----------------------------|---------------------------|-----------------------------|
-        // | DMA 1 (TX)  | RAM Buffer                 | PIO TX FIFO (PIO0_TXF_SM0)  | TX FIFO feeds OSR         | OSR (Output Shift Register) |
-        // | DMA 2 (RX)  | PIO RX FIFO (PIO0_RXF_SM0) | RAM Buffer                  | RX FIFO receives from ISR | ISR (Input Shift Register)  |
+    /// Generates a PIO program to produce greyscale color encoded as RGB444
+    /// physically. Each pixel may have 2, 4, or 16 greyscale levels (1, 2, or 4 bpp).
+    fn greyscale_pio(color: MonochromeColor) -> pio::Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
+        let mut a = pio::Assembler::<{ pio::RP2040_MAX_PROGRAM_SIZE }>::new();
 
-        const SIZE: usize = 4;
-        let input_buffer = [0x5au8; SIZE];
-        let mut output_buffer = [0u8; 6 * SIZE]; // bpp = 2, 12/bpp, 12 is the physical format RGB444
+        const RGB_BPP: u8 = 12;
+        let bpp = color as u8;
 
-        let mut pac = rp2040_pac::Peripherals::take().unwrap();
-        let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
+        let mut repeat = a.label();
 
-        let _clocks = rp2040_hal::clocks::init_clocks_and_plls(
-            crate::XOSC_CRYSTAL_FREQ,
-            pac.XOSC,
-            pac.CLOCKS,
-            pac.PLL_SYS,
-            pac.PLL_USB,
-            &mut pac.RESETS,
-            &mut watchdog,
-        )
-        .ok()
-        .unwrap();
+        // Pull `bpp` bits (1, 2, or 4) from the TX FIFO into OSR
+        a.out(pio::OutDestination::X, bpp);
 
-        // bpp = 2, greyscale so R == G == B, each
-        // repeating 12 times within RGB444.
-        // Pixel can be 0b00..0b11. Need to repeat that 6 times for greyscale
-        let expand_times6_pio = pio_proc::pio_asm!(
-            ".wrap_target",
-            "           out     x, 2", // bpp
-            "           set     y, 5", // 12/bpp - 1
-            "repeat:",
-            "           in      x, 2", // bpp
-            "           jmp     y--, repeat",
-            ".wrap"
-        );
+        // Loop counter in `Y` to repeat `bpp` as many times as need
+        // to fill RGB444 for the greyscale color.
+        a.set(pio::SetDestination::Y, RGB_BPP / bpp - 1);
+        a.bind(&mut repeat);
+        // Push the bits into ISR which goes into RX FIFO.
+        a.r#in(pio::InSource::X, bpp);
+        // Repeat
+        a.jmp(pio::JmpCondition::YDecNonZero, &mut repeat);
 
-        // Reset DMA
-        let _dma = pac.DMA.split(&mut pac.RESETS);
-        // Reset PIO
-        let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
-
-        let installed_pio = pio.install(&expand_times6_pio.program).unwrap();
-        let (sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed_pio)
-            .autopull(true)
-            .autopush(true)
-            .build(sm0);
-        sm.start();
-
-        let txf = tx.fifo_address();
-        let rxf = rx.fifo_address();
-
-        defmt::info!("input_buffer: {:08b}", input_buffer);
-        defmt::info!("output_buffer: {:08b}", output_buffer);
-
-        let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
-            word_size: TxSize::_32bit,
-            source: Source {
-                address: input_buffer.as_ptr(),
-                increment: true,
-            },
-            destination: Destination {
-                address: txf.cast_mut().cast(),
-                increment: false,
-            },
-            tx_count: SIZE as u32 / 4,
-            tx_req: TxReq::Pio0Tx0,
-            byte_swap: false,
-            start: false,
-        });
-        let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
-            word_size: TxSize::_32bit,
-            source: Source {
-                address: rxf.cast(),
-                increment: false,
-            },
-            destination: Destination {
-                address: output_buffer.as_mut_ptr(),
-                increment: true,
-            },
-            tx_count: 6 * SIZE as u32 / 4,
-            tx_req: TxReq::Pio0Rx0,
-            byte_swap: false,
-            start: false,
-        });
-
-        // Start the DMA transfers
-        dma1.trigger();
-        dma2.trigger();
-
-        // Wait for the DMA transfers to complete
-        dma1.wait();
-        dma2.wait();
-
-        defmt::info!("input_buffer: {:08b}", input_buffer);
-        defmt::info!("output_buffer: {:08b}", output_buffer);
+        a.assemble_program()
     }
 
-    pub fn test_with_pio_expand_3times() {
+    pub fn test_with_pio_expand_dynamic(color: MonochromeColor) {
         // | DMA Channel | Source (Read Address)      | Destination (Write Address) | FIFO Connection           | Shift Register              |
         // |-------------|----------------------------|-----------------------------|---------------------------|-----------------------------|
         // | DMA 1 (TX)  | RAM Buffer                 | PIO TX FIFO (PIO0_TXF_SM0)  | TX FIFO feeds OSR         | OSR (Output Shift Register) |
         // | DMA 2 (RX)  | PIO RX FIFO (PIO0_RXF_SM0) | RAM Buffer                  | RX FIFO receives from ISR | ISR (Input Shift Register)  |
 
+        const RGB_BPP: u8 = 12;
+        let bpp = RGB_BPP / color as u8;
+
         const SIZE: usize = 4;
-        let input_buffer = [0x5au8; SIZE];
-        let mut output_buffer = [0u8; 3 * SIZE]; // bpp = 4, 12/bpp, 12 is the physical format RGB444
+        let input_buffer: [u8; SIZE] = [0xaa; SIZE];
+        let mut output_buffer: [u8; 12 * SIZE] = [0u8; 12 * SIZE]; // Max output size, each input bit repeated 12 times (greyscale RGB444)
 
         let mut pac = rp2040_pac::Peripherals::take().unwrap();
         let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
@@ -788,25 +718,13 @@ pub mod tests {
         .ok()
         .unwrap();
 
-        // bpp = 4, greyscale so R == G == B, each
-        // repeating 3 times within RGB444.
-        // Pixel can be 0b0000..0b1111. Need to repeat that 3 times for greyscale
-        let expand_times6_pio = pio_proc::pio_asm!(
-            ".wrap_target",
-            "           out     x, 4", // bpp
-            "           set     y, 2", // 12/bpp - 1
-            "repeat:",
-            "           in      x, 4", // bpp
-            "           jmp     y--, repeat",
-            ".wrap"
-        );
-
         // Reset DMA
         let _dma = pac.DMA.split(&mut pac.RESETS);
         // Reset PIO
         let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
 
-        let installed_pio = pio.install(&expand_times6_pio.program).unwrap();
+        let greyscale_pio = greyscale_pio(color);
+        let installed_pio = pio.install(&greyscale_pio).unwrap();
         let (sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed_pio)
             .autopull(true)
             .autopush(true)
@@ -844,7 +762,7 @@ pub mod tests {
                 address: output_buffer.as_mut_ptr(),
                 increment: true,
             },
-            tx_count: 3 * SIZE as u32 / 4,
+            tx_count: bpp as u32 * SIZE as u32 / 4,
             tx_req: TxReq::Pio0Rx0,
             byte_swap: false,
             start: false,
