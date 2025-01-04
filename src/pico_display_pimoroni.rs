@@ -399,7 +399,7 @@ where
     TDispAttr: DisplayAttributes,
 {
     pub fn new() -> Self {
-        crate::lax_dma::tests::test_with_pio_invert();
+        crate::lax_dma::tests::test_with_pio_invert_twice();
 
         let display_kind = TDispAttr::kind();
         let mut pac = rp2040_pac::Peripherals::take().unwrap();

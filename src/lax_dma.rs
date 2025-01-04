@@ -480,7 +480,7 @@ pub mod tests {
         }
     }
 
-    pub fn test_with_pio_invert() {
+    pub fn test_with_pio_invert_twice() {
         // | DMA Channel | Source (Read Address)      | Destination (Write Address) | FIFO Connection           | Shift Register              |
         // |-------------|----------------------------|-----------------------------|---------------------------|-----------------------------|
         // | DMA 1 (TX)  | RAM Buffer                 | PIO TX FIFO (PIO0_TXF_SM0)  | TX FIFO feeds OSR         | OSR (Output Shift Register) |
@@ -507,29 +507,53 @@ pub mod tests {
         .unwrap();
 
         let invert_pio = pio_proc::pio_asm!(
-            ".wrap_target",
-            "pull",       // PIO TX FIFO -> OSR (no need if `autopull` is true)
-            "mov x, osr", // OSR -> x (same as `out x, 32` for shifting 32 bits from OSR)
-            "mov x, ~x",  // ~x -> x (bitwise invert)
-            "mov isr, x", // x -> ISR (same as `in x, 32` as shifting 32 bits into ISR)
-            "push",       // ISR -> PIO TX FIFO (no need if `autopush` is true)
-            ".wrap"
+            "more:",
+            "       pull", // PIO TX FIFO -> OSR (no need if `autopull` is true)
+            "       mov     x, osr", // OSR -> x (same as `out x, 32` for shifting 32 bits from OSR)
+            "       mov     x, ~x", // ~x -> x (bitwise invert)
+            "       mov     isr, x", // x -> ISR (same as `in x, 32` as shifting 32 bits into ISR)
+            "       push", // ISR -> PIO TX FIFO (no need if `autopush` is true)
+            "       irq     wait 4",
+            "       jmp     !osre, more",
+        );
+
+        let invert_pio_again = pio_proc::pio_asm!(
+            "more:",
+            "       wait    1 irq 4",
+            "       pull", // PIO TX FIFO -> OSR (no need if `autopull` is true)
+            "       mov     x, osr", // OSR -> x (same as `out x, 32` for shifting 32 bits from OSR)
+            "       mov     x, ~x", // ~x -> x (bitwise invert)
+            "       mov     isr, x", // x -> ISR (same as `in x, 32` as shifting 32 bits into ISR)
+            "       push", // ISR -> PIO TX FIFO (no need if `autopush` is true)
+            "       jmp     !osre, more",
         );
 
         // Reset DMA
         let _dma = pac.DMA.split(&mut pac.RESETS);
         // Reset PIO
-        let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
+        let (mut pio, sm0, sm1, _, _) = pac.PIO0.split(&mut pac.RESETS);
 
-        let installed_pio = pio.install(&invert_pio.program).unwrap();
-        let (sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed_pio)
-            .autopull(false)
-            .autopush(false)
-            .build(sm0);
-        sm.start();
+        let (sm0, rx0, tx0) = rp2040_hal::pio::PIOBuilder::from_installed_program(
+            pio.install(&invert_pio.program).unwrap(),
+        )
+        .autopull(false)
+        .autopush(false)
+        .build(sm0);
+        sm0.start();
 
-        let txf = tx.fifo_address();
-        let rxf = rx.fifo_address();
+        let (sm1, rx1, tx1) = rp2040_hal::pio::PIOBuilder::from_installed_program(
+            pio.install(&invert_pio_again.program).unwrap(),
+        )
+        .autopull(false)
+        .autopush(false)
+        .build(sm1);
+        sm1.start();
+
+        let txf0 = tx0.fifo_address();
+        let rxf0 = rx0.fifo_address();
+
+        let txf1 = tx1.fifo_address();
+        let rxf1 = rx1.fifo_address();
 
         defmt::info!("input_buffer: {:08b}", input_buffer);
         defmt::info!("output_buffer: {:08b}", output_buffer);
@@ -537,10 +561,10 @@ pub mod tests {
         // This DMA channel transfers data from the PIO state machine's
         // RX FIFO to the output buffer. It will be stalled until the
         // next DMA channel is started and feeds the PIO TX FIFO.
-        let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
+        let dma3 = LaxDmaWrite::new::<dma::CH3>(Config {
             word_size: TxSize::_32bit,
             source: Source {
-                address: rxf.cast(),
+                address: rxf1.cast(),
                 increment: false,
             },
             destination: Destination {
@@ -548,7 +572,26 @@ pub mod tests {
                 increment: true,
             },
             tx_count: SIZE as u32 / 4,
-            tx_req: TxReq::Pio0Rx0,
+            tx_req: TxReq::Pio0Rx1,
+            byte_swap: false,
+            start: true,
+        });
+
+        // This DMA channel transfers data from the PIO state machine's
+        // RX FIFO to the output buffer. It will be stalled until the
+        // next DMA channel is started and feeds the PIO TX FIFO.
+        let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
+            word_size: TxSize::_32bit,
+            source: Source {
+                address: rxf0.cast(),
+                increment: false,
+            },
+            destination: Destination {
+                address: txf1.cast_mut().cast(),
+                increment: false,
+            },
+            tx_count: SIZE as u32 / 4,
+            tx_req: TxReq::Pio0Tx1,
             byte_swap: false,
             start: true,
         });
@@ -563,7 +606,7 @@ pub mod tests {
                 increment: true,
             },
             destination: Destination {
-                address: txf.cast_mut().cast(),
+                address: txf0.cast_mut().cast(),
                 increment: false,
             },
             tx_count: SIZE as u32 / 4,
@@ -595,6 +638,7 @@ pub mod tests {
 
         // Wait for the DMA transfers to complete
         dma2.wait();
+        dma3.wait();
 
         defmt::info!("input_buffer: {:08b}", input_buffer);
         defmt::info!("output_buffer: {:08b}", output_buffer);
