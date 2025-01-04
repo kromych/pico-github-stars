@@ -72,9 +72,8 @@ fn main() -> ! {
     let green_rgb565 = 0x07E0u16;
     let blue_rgb565 = 0x001Fu16;
     let color_be = blue_rgb565.to_be();
-    let mut buffer = [color_be; 100 * 100];
     let mut display = PicoDisplay2_8::new();
-    display.flush(&mut buffer, 120, 120, 200 - 1, 200 - 1);
+    display.flush();
 
     loop {
         cortex_m::asm::wfe();

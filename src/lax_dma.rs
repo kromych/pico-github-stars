@@ -232,6 +232,10 @@ impl LaxDmaWrite {
     pub fn tx_count_remaining(&self) -> u32 {
         self.ch.ch_trans_count().read().bits()
     }
+
+    pub fn read_trig_addr(&self) -> *const u8 {
+        self.ch.ch_al3_read_addr_trig().as_ptr() as *const u8
+    }
 }
 
 #[allow(dead_code)]
@@ -478,6 +482,7 @@ pub mod tests {
         const SIZE: usize = 32;
         let input_buffer = [0x55u8; SIZE];
         let mut output_buffer = [0u8; SIZE];
+        let input_buffer_addr = [input_buffer.as_ptr() as u32];
 
         let mut pac = rp2040_pac::Peripherals::take().unwrap();
         let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
@@ -522,21 +527,9 @@ pub mod tests {
         defmt::info!("input_buffer: {:08b}", input_buffer);
         defmt::info!("output_buffer: {:08b}", output_buffer);
 
-        let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
-            word_size: TxSize::_32bit,
-            source: Source {
-                address: input_buffer.as_ptr(),
-                increment: true,
-            },
-            destination: Destination {
-                address: txf.cast_mut().cast(),
-                increment: false,
-            },
-            tx_count: SIZE as u32 / 4,
-            tx_req: TxReq::Pio0Tx0,
-            byte_swap: false,
-            start: false,
-        });
+        // This DMA channel transfers data from the PIO state machine's
+        // RX FIFO to the output buffer. It will be stalled until the
+        // next DMA channel is started and feeds the PIO TX FIFO.
         let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
             word_size: TxSize::_32bit,
             source: Source {
@@ -550,15 +543,48 @@ pub mod tests {
             tx_count: SIZE as u32 / 4,
             tx_req: TxReq::Pio0Rx0,
             byte_swap: false,
+            start: true,
+        });
+
+        // This DMA channel transfers data from the input buffer to the PIO state machine's TX FIFO.
+        let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
+            word_size: TxSize::_32bit,
+            source: Source {
+                address: core::ptr::null(),
+                increment: true,
+            },
+            destination: Destination {
+                address: txf.cast_mut().cast(),
+                increment: false,
+            },
+            tx_count: SIZE as u32 / 4,
+            tx_req: TxReq::Pio0Tx0,
+            byte_swap: false,
+            start: false,
+        });
+
+        // This DMA channel is used to configure the next one by writing to
+        // the channel read address trigger register.
+        let dma0 = LaxDmaWrite::new::<dma::CH0>(Config {
+            word_size: TxSize::_32bit,
+            source: Source {
+                address: input_buffer_addr.as_ptr().cast(),
+                increment: false,
+            },
+            destination: Destination {
+                address: dma1.read_trig_addr().cast_mut().cast(),
+                increment: false,
+            },
+            tx_count: 1,
+            tx_req: TxReq::Permanent,
+            byte_swap: false,
             start: false,
         });
 
         // Start the DMA transfers
-        dma1.trigger();
-        dma2.trigger();
+        dma0.trigger();
 
         // Wait for the DMA transfers to complete
-        dma1.wait();
         dma2.wait();
 
         defmt::info!("input_buffer: {:08b}", input_buffer);
@@ -622,6 +648,7 @@ pub mod tests {
         defmt::info!("input_buffer: {:08b}", input_buffer);
         defmt::info!("output_buffer: {:08b}", output_buffer);
 
+        // This DMA channel transfers data from the input buffer to the PIO state machine's TX FIFO.
         let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
             word_size: TxSize::_32bit,
             source: Source {
@@ -637,6 +664,9 @@ pub mod tests {
             byte_swap: false,
             start: false,
         });
+
+        // This DMA channel transfers data from the PIO state machine's
+        // RX FIFO to the output buffer
         let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
             word_size: TxSize::_32bit,
             source: Source {
@@ -737,6 +767,7 @@ pub mod tests {
         defmt::info!("input_buffer: {:08b}", input_buffer);
         defmt::info!("output_buffer: {:08b}", output_buffer);
 
+        // This DMA channel transfers data from the input buffer to the PIO state machine's TX FIFO.
         let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
             word_size: TxSize::_32bit,
             source: Source {
@@ -752,6 +783,9 @@ pub mod tests {
             byte_swap: false,
             start: false,
         });
+
+        // This DMA channel transfers data from the PIO state machine's
+        // RX FIFO to the output buffer.
         let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
             word_size: TxSize::_32bit,
             source: Source {

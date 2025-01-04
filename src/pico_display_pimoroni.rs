@@ -30,16 +30,12 @@
 
 #![allow(dead_code)]
 
-use crate::lax_dma;
 use core::marker::PhantomData;
 use core::usize;
 use cortex_m::asm::delay;
 use embedded_hal::digital::InputPin;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::pwm::SetDutyCycle;
-use embedded_hal::spi::SpiBus;
-use fugit::RateExtU32;
-use rp2040_hal::dma;
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::dma::SingleChannel;
 use rp2040_hal::gpio;
@@ -50,12 +46,8 @@ use rp2040_hal::gpio::Pin;
 use rp2040_hal::gpio::PinId;
 use rp2040_hal::gpio::PullDown;
 use rp2040_hal::gpio::*;
-use rp2040_hal::pio::PIOBuilder;
-use rp2040_hal::pio::PIOExt;
 use rp2040_hal::pwm;
-use rp2040_hal::spi;
 use rp2040_hal::Clock;
-use rp2040_hal::Spi;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[allow(dead_code)]
@@ -385,14 +377,6 @@ where
 
     dc_pin: Pin<Gpio16, FunctionSioOutput, PullDown>,
     cs_pin: Pin<Gpio17, FunctionSioOutput, PullDown>,
-    spi_device: Spi<
-        spi::Enabled,
-        rp2040_pac::SPI0,
-        (
-            Pin<Gpio19, FunctionSpi, PullDown>,
-            Pin<Gpio18, FunctionSpi, PullDown>,
-        ),
-    >,
 
     dma0: u8,
     dma1: u8,
@@ -402,8 +386,6 @@ where
     width: u16,
     height: u16,
     pixel_count: u32,
-    sspdr: *mut u32,
-    tearing_effect: TearingEffect,
     last_vsync_time: u32,
 }
 
@@ -417,8 +399,7 @@ where
     TDispAttr: DisplayAttributes,
 {
     pub fn new() -> Self {
-        crate::lax_dma::tests::test_with_pio_expand_dynamic(MonochromeColor::Bpp1);
-        todo!("Implement the Display::new method");
+        crate::lax_dma::tests::test_with_pio_invert();
 
         let display_kind = TDispAttr::kind();
         let mut pac = rp2040_pac::Peripherals::take().unwrap();
@@ -436,7 +417,6 @@ where
         )
         .ok()
         .unwrap();
-        let sspdr = pac.SPI0.sspdr().as_ptr(); // For DMA, we need the address of the register
 
         let sio = rp2040_hal::sio::Sio::new(pac.SIO);
         let pins = Pins::new(
@@ -780,26 +760,11 @@ where
 
         //let group = sm0.with(sm1).sync().start();
 
-        // Serious SPI speed
-
-        let sck_pin = sck_pin.into_function::<gpio::FunctionSpi>();
-        let mosi_pin = mosi_pin.into_function::<gpio::FunctionSpi>();
-
-        let spi_device = Spi::<_, _, _, 8>::new(pac.SPI0, (mosi_pin, sck_pin));
-        let spi_device = spi_device.init(
-            &mut pac.RESETS,
-            clocks.peripheral_clock.freq(),
-            62_500_u32.kHz(),
-            embedded_hal::spi::MODE_0,
-        );
-
         let mut display = Display {
             display_attr: PhantomData,
             width: TDispAttr::width(),
             height: TDispAttr::height(),
             pixel_count: TDispAttr::width() as u32 * TDispAttr::height() as u32,
-            sspdr,
-            tearing_effect: TearingEffect::Off,
             last_vsync_time: 0,
             red_led_pin,
             green_led_pin,
@@ -808,12 +773,9 @@ where
             dc_pin,
             cs_pin,
             vsync_pin,
-            spi_device,
             dma0: dma.ch0.id(),
             dma1: dma.ch1.id(),
         };
-
-        display.set_tearing_effect(TearingEffect::HorizontalAndVertical);
 
         display.set_backlight(40);
         delay.delay_ms(10);
@@ -821,76 +783,8 @@ where
         display
     }
 
-    #[inline(always)]
-    fn write_command(&mut self, command: Command) {
-        self.dc_pin.set_low().unwrap();
-
-        self.cs_pin.set_low().unwrap();
-        self.spi_device.write(&[command as u8]).unwrap(); // TODO: Handle error
-        self.cs_pin.set_high().unwrap();
-
-        // defmt::info!("Command 0x{:x}", command as u8);
-    }
-
-    #[inline(always)]
-    fn write_data(&mut self, data: &[u8]) {
-        self.dc_pin.set_high().unwrap();
-
-        for byte in data {
-            self.cs_pin.set_low().unwrap();
-            self.spi_device.write(&[*byte]).unwrap(); // TODO: Handle error
-            self.cs_pin.set_high().unwrap();
-        }
-
-        // defmt::info!("Command 0x{:x}", command as u8);
-    }
-
-    #[inline(always)]
-    fn write_command_with_data(&mut self, command: Command, data: &[u8]) {
-        self.write_command(command);
-        self.write_data(data);
-    }
-
-    fn set_address_window(&mut self, sx: u16, sy: u16, ex: u16, ey: u16) {
-        self.write_command(Command::CASET);
-        self.write_data(&sx.to_be_bytes());
-        self.write_data(&ex.to_be_bytes());
-        self.write_command(Command::RASET);
-        self.write_data(&sy.to_be_bytes());
-        self.write_data(&ey.to_be_bytes());
-    }
-
-    pub fn flush<'a>(&mut self, buffer: &'a mut [u16], sx: u16, sy: u16, ex: u16, ey: u16) {
-        let tx_req = lax_dma::TxReq::Spi0Tx;
-        let dma_config = lax_dma::Config {
-            word_size: lax_dma::TxSize::_8bit,
-            source: lax_dma::Source {
-                address: buffer.as_ptr().cast(),
-                increment: true,
-            },
-            destination: lax_dma::Destination {
-                address: self.sspdr.cast(),
-                increment: false,
-            },
-            tx_count: 2 * buffer.len() as u32,
-            tx_req,
-            byte_swap: false,
-            start: true,
-        };
-
-        self.set_address_window(sx, sy, ex, ey);
-        self.write_command(Command::RAMWR);
-
-        self.dc_pin.set_high().unwrap();
-        self.cs_pin.set_low().unwrap();
-
-        let dma = lax_dma::LaxDmaWrite::new::<dma::CH0>(dma_config);
-        //dma.trigger();
-        dma.wait();
-
-        self.cs_pin.set_high().unwrap();
-
-        //defmt::info!("flush done, time: {:x}", time::time_us());
+    pub fn flush<'a>(&mut self) {
+        self.wait_for_vsync();
     }
 
     pub fn set_backlight(&mut self, value: u8) {
@@ -916,25 +810,10 @@ where
         self.backlight_pwm.set_duty_cycle_fully_off().unwrap();
     }
 
-    pub fn set_tearing_effect(&mut self, tearing_effect: TearingEffect) {
-        self.tearing_effect = tearing_effect;
-        match self.tearing_effect {
-            TearingEffect::Off => self.write_command(Command::TEOFF),
-            TearingEffect::Vertical => self.write_command_with_data(Command::TEON, &[0]),
-            TearingEffect::HorizontalAndVertical => {
-                self.write_command_with_data(Command::TEON, &[1])
-            }
-        };
-    }
-
     #[inline(always)]
     fn wait_for_vsync(&mut self) {
-        if self.tearing_effect == TearingEffect::Off {
-            return;
-        }
-
         while self.vsync_pin.is_high().unwrap() {}
         // while self.vsync_pin.is_low().unwrap() {}
-        // self.last_vsync_time = crate::time::time_us();
+        self.last_vsync_time = crate::time::time_us();
     }
 }
