@@ -238,6 +238,13 @@ impl LaxDmaWrite {
     }
 }
 
+impl Drop for LaxDmaWrite {
+    fn drop(&mut self) {
+        self.wait();
+        self.ch.ch_al1_ctrl().reset();
+    }
+}
+
 #[allow(dead_code)]
 pub mod tests {
     use crate::lax_dma;
