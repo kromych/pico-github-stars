@@ -554,6 +554,8 @@ pub mod tests {
         });
 
         // This DMA channel transfers data from the input buffer to the PIO state machine's TX FIFO.
+        // If this one is chained to dma0 (that writes to this channel's read trigger address),
+        // the two will be res-starting together, running in the ping-pong mode.
         let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
             word_size: TxSize::_32bit,
             source: Source {
