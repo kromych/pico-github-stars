@@ -637,6 +637,7 @@ pub mod tests {
         dma0.trigger();
 
         // Wait for the DMA transfers to complete
+        dma0.wait();
         dma2.wait();
         dma3.wait();
 
