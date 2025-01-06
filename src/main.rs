@@ -4,7 +4,6 @@
 use defmt_rtt as _;
 use panic_probe as _;
 use pico_display_pimoroni::MonochromeColor;
-use pico_display_pimoroni::MonochromeDisplayBuffer;
 use pico_display_pimoroni::PicoDisplay2_8;
 use rp2040_hal::rom_data;
 
@@ -64,14 +63,7 @@ fn main() -> ! {
 
     defmt::info!("Display size: {}x{}", DISPLAY_WIDTH, DISPLAY_HEIGHT);
     defmt::info!("Display buffer size: {}", DISPLAY_BUFFER_SIZE);
-    let buffer = [0u8; DISPLAY_BUFFER_SIZE];
-    let mut fb =
-        MonochromeDisplayBuffer::new(DISPLAY_WIDTH, DISPLAY_HEIGHT, buffer, DISPLAY_COLOR).unwrap();
 
-    let red_rgb565 = 0xF800u16;
-    let green_rgb565 = 0x07E0u16;
-    let blue_rgb565 = 0x001Fu16;
-    let color_be = blue_rgb565.to_be();
     let mut display = PicoDisplay2_8::new();
     display.flush();
 

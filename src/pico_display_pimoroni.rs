@@ -30,14 +30,20 @@
 
 #![allow(dead_code)]
 
+use crate::lax_dma::Config;
+use crate::lax_dma::Destination;
+use crate::lax_dma::LaxDmaWrite;
+use crate::lax_dma::Source;
+use crate::lax_dma::TxReq;
+use crate::lax_dma::TxSize;
 use core::marker::PhantomData;
 use core::usize;
 use cortex_m::asm::delay;
 use embedded_hal::digital::InputPin;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::pwm::SetDutyCycle;
+use rp2040_hal::dma;
 use rp2040_hal::dma::DMAExt;
-use rp2040_hal::dma::SingleChannel;
 use rp2040_hal::gpio;
 use rp2040_hal::gpio::bank0::*;
 use rp2040_hal::gpio::FunctionSioInput;
@@ -46,6 +52,8 @@ use rp2040_hal::gpio::Pin;
 use rp2040_hal::gpio::PinId;
 use rp2040_hal::gpio::PullDown;
 use rp2040_hal::gpio::*;
+use rp2040_hal::pio::PIOBuilder;
+use rp2040_hal::pio::PIOExt;
 use rp2040_hal::pwm;
 use rp2040_hal::Clock;
 
@@ -244,31 +252,12 @@ impl MonochromeColor {
     }
 }
 
-pub struct MonochromeDisplayBuffer<const N: usize> {
+#[repr(align(512))]
+struct MonochromeDisplayBuffer<const N: usize> {
+    buffer: [u32; N],
     width: u16,
     height: u16,
-    buffer: [u8; N],
     color: MonochromeColor,
-}
-
-impl<const N: usize> MonochromeDisplayBuffer<N> {
-    pub const fn new(
-        width: u16,
-        height: u16,
-        buffer: [u8; N],
-        color: MonochromeColor,
-    ) -> Result<Self, DisplayError> {
-        if N != (width as usize * height as usize) / color.pixel_per_byte() as usize {
-            Err(DisplayError::FramebufferSizeMismatch)
-        } else {
-            Ok(Self {
-                width,
-                height,
-                buffer,
-                color,
-            })
-        }
-    }
 }
 
 /// A manual SPI implementation for the Pico Display
@@ -351,23 +340,28 @@ where
         self.write_data(val);
     }
 
+    /// Leaves the pins in the state that is suitable for sending data
     fn release(
-        self,
+        mut self,
     ) -> (
         Pin<MOSI, FunctionSioOutput, PullDown>,
         Pin<CLK, FunctionSioOutput, PullDown>,
         Pin<CS, FunctionSioOutput, PullDown>,
         Pin<DC, FunctionSioOutput, PullDown>,
     ) {
+        self.dc.set_high().unwrap(); // Data/Command high for data
+        self.cs.set_low().unwrap(); // Chip select active
+
         (self.mosi, self.clk, self.cs, self.dc)
     }
 }
 
-pub struct Display<TDispAttr>
+struct Display<TDispAttr, const N: usize>
 where
     TDispAttr: DisplayAttributes,
 {
     display_attr: PhantomData<TDispAttr>,
+    display_buffer: MonochromeDisplayBuffer<N>,
 
     red_led_pin: Pin<Gpio26, FunctionSioOutput, PullDown>,
     green_led_pin: Pin<Gpio27, FunctionSioOutput, PullDown>,
@@ -377,11 +371,13 @@ where
 
     dc_pin: Pin<Gpio16, FunctionSioOutput, PullDown>,
     cs_pin: Pin<Gpio17, FunctionSioOutput, PullDown>,
+    sck_pin: Pin<Gpio18, FunctionSioOutput, PullDown>,
+    mosi_pin: Pin<Gpio19, FunctionSioOutput, PullDown>,
+    vsync_pin: Pin<Gpio21, FunctionSioInput, PullUp>,
 
-    dma0: u8,
-    dma1: u8,
-
-    vsync_pin: Pin<Gpio21, FunctionSioInput, PullNone>,
+    color_expand_sm_dma: LaxDmaWrite,
+    display_sm_dma: LaxDmaWrite,
+    dma_trig_addr: *mut u32,
 
     width: u16,
     height: u16,
@@ -389,18 +385,42 @@ where
     last_vsync_time: u32,
 }
 
-pub type PicoDisplay2_8<'a> = Display<Display2_8>;
-pub type PicoDisplay2_0<'a> = Display<Display2_0>;
-pub type PicoDisplay1_14<'a> = Display<Display1_14>;
-pub type PicoDisplaySquare<'a> = Display<DisplaySquare>;
+/// Generates a PIO program to produce greyscale color encoded as RGB444
+/// physically. Each pixel may have 2, 4, or 16 greyscale levels (1, 2, or 4 bpp).
+fn gen_monochrome_pio_program(
+    color: MonochromeColor,
+) -> pio::Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
+    let mut a = pio::Assembler::<{ pio::RP2040_MAX_PROGRAM_SIZE }>::new();
 
-impl<TDispAttr> Display<TDispAttr>
+    const RGB_BPP: u8 = 12;
+    let bpp = color as u8;
+
+    let mut repeat = a.label();
+
+    // Pull `bpp` bits (1, 2, or 4) from the TX FIFO into OSR
+    a.out(pio::OutDestination::X, bpp);
+
+    // Loop counter in `Y` to repeat `bpp` as many times as need
+    // to fill RGB444 for the greyscale color.
+    a.set(pio::SetDestination::Y, RGB_BPP / bpp - 1);
+    a.bind(&mut repeat);
+    // Push the bits into ISR which goes into RX FIFO.
+    a.r#in(pio::InSource::X, bpp);
+    // Repeat
+    a.jmp(pio::JmpCondition::YDecNonZero, &mut repeat);
+
+    a.assemble_program()
+}
+
+fn rgb444_pio_program() -> pio::Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
+    pio_proc::pio_asm!("more:", "jmp more").program
+}
+
+impl<TDispAttr, const N: usize> Display<TDispAttr, N>
 where
     TDispAttr: DisplayAttributes,
 {
-    pub fn new() -> Self {
-        crate::lax_dma::tests::test_with_pio_invert_twice();
-
+    pub fn new(color: MonochromeColor) -> Self {
         let display_kind = TDispAttr::kind();
         let mut pac = rp2040_pac::Peripherals::take().unwrap();
         let core = rp2040_pac::CorePeripherals::take().unwrap();
@@ -442,10 +462,12 @@ where
         let cs_pin = pins.gpio17.into_push_pull_output();
         let sck_pin = pins.gpio18.into_push_pull_output();
         let mosi_pin = pins.gpio19.into_push_pull_output();
-        let vsync_pin = pins.gpio21.into_floating_input();
+        let vsync_pin = pins.gpio21.into_pull_up_input();
 
-        let dma = pac.DMA.split(&mut pac.RESETS);
-        //lax_dma::tests::run_dma_tests();
+        // Reset the DMA peripheral and split it into channels
+        let _dma = pac.DMA.split(&mut pac.RESETS);
+        // Reset the PIO peripheral and split it into state machines
+        let (mut pio, sm0, sm1, _, _) = pac.PIO0.split(&mut pac.RESETS);
 
         let pwm_slices = pwm::Slices::new(pac.PWM, &mut pac.RESETS);
         let mut backlight_pwm = pwm_slices.pwm2;
@@ -708,59 +730,87 @@ where
             display.write_data(&[madctl]);
         }
 
-        let (mosi_pin, sck_pin, cs_pin, dc_pin) = display.release();
+        // Prepare the display hardware for sending data.
+        // The pins will be released after the display is done with and
+        // the display hardware is ready to receive data.
+        let (mosi_pin, sck_pin, cs_pin, dc_pin) = {
+            display.write_command(Command::RAMWR);
+            display.release()
+        };
 
-        let build_color_pio = pio_proc::pio_asm!(
-            ".side_set 2",
-            ".wrap_target",
-            "more:",
-            "        out     y, 1 side 0", /* bpp */
-            "        mov     y, ~y side 0",
-            "        set     x, 11 side 2", /* 12/bpp */
-            "again:",
-            "        in      y, 1 side 0", /* bpp */
-            "        jmp     x--, again side 0",
-            "        wait    1 irq 4 side 0",
-            "        jmp     !osre, more side 0",
-            ".wrap"
-        );
-        let lcd_pio = pio_proc::pio_asm!(
-            ".side_set 2",
-            ".wrap_target",
-            "        set     x, 10 side 2",
-            "        mov     isr, x side 0",
-            "        in      null, 10 side 0",
-            "        mov     x, isr side 0",
-            "        jmp     x--, pullgo side 0",
-            "pullgo:",
-            "        irq     wait 4 side 0",
-            "        set     y, 11 side 0",
-            "        pull    side 0",
-            "getbits:",
-            "        out     pins, 1 side 2",
-            "        jmp     y--, getbits side 3",
-            "        jmp     x--, pullgo side 2",
-            ".wrap"
-        );
+        let display_buffer = MonochromeDisplayBuffer {
+            buffer: [0; N],
+            width: TDispAttr::width(),
+            height: TDispAttr::height(),
+            color,
+        };
 
-        // let (mut pio, sm0, sm1, _, _) = pac.PIO0.split(&mut pac.RESETS);
-        // let installed_build_color_pio = pio.install(&build_color_pio.program).unwrap();
-        // let installed_lcd_pio = pio.install(&lcd_pio.program).unwrap();
+        let (mut color_expand_sm, color_expand_rx, color_expand_tx) =
+            PIOBuilder::from_installed_program(
+                pio.install(&gen_monochrome_pio_program(color)).unwrap(),
+            )
+            .autopull(true)
+            .autopush(true)
+            .build(sm0);
+        color_expand_sm.set_clock_divisor(1.0);
 
-        // let (mut sm0, _, _) = PIOBuilder::from_installed_program(installed_build_color_pio)
-        //     .set_pins(pin0, 1)
-        //     .build(sm0);
-        // sm0.set_pindirs([(pin0, hal::pio::PinDir::Output)]);
+        defmt::info!("MOSI pin: {:?}", mosi_pin.id().num);
+        defmt::info!("SCK pin: {:?}", sck_pin.id().num);
 
-        // let (mut sm1, _, _) = PIOBuilder::from_installed_program(installed_lcd_pio)
-        //     .set_pins(pin1, 1)
-        //     .build(sm1);
-        // // The GPIO pin needs to be configured as an output.
-        // sm1.set_pindirs([(pin1, hal::pio::PinDir::Output)]);
+        let (mut display_spi_sm, _display_spi_rx, display_spi_tx) =
+            PIOBuilder::from_installed_program(pio.install(&rgb444_pio_program()).unwrap())
+                .autopull(true)
+                .autopush(true)
+                .buffers(rp2040_hal::pio::Buffers::OnlyTx)
+                .set_pins(mosi_pin.id().num, 1)
+                .side_set_pin_base(sck_pin.id().num)
+                .build(sm1);
+        display_spi_sm.set_clock_divisor(1.0);
 
-        //let group = sm0.with(sm1).sync().start();
+        color_expand_sm.start();
+        display_spi_sm.start();
+
+        // This DMA channel transfers data from the PIO state machine's
+        // RX FIFO to the display. It will be stalled until the
+        // next DMA channel is started and feeds the PIO TX FIFO.
+        let display_sm_dma = LaxDmaWrite::new::<dma::CH2>(Config {
+            word_size: TxSize::_32bit,
+            source: Source {
+                address: color_expand_rx.fifo_address().cast(),
+                increment: false,
+            },
+            destination: Destination {
+                address: display_spi_tx.fifo_address().cast_mut().cast(),
+                increment: false,
+            },
+            tx_count: 12 / color.bits_per_pixel() as u32 * N as u32, // RGB444, monochrome color
+            tx_req: TxReq::Pio0Tx1,
+            byte_swap: false,
+            start: true,
+        });
+
+        // This DMA channel transfers data from the input buffer to the PIO state machine's TX FIFO.
+        // If this one is chained to dma0 (that writes to this channel's read trigger address),
+        // the two will be res-starting together, running in the ping-pong mode.
+        let color_expand_sm_dma = LaxDmaWrite::new::<dma::CH1>(Config {
+            word_size: TxSize::_32bit,
+            source: Source {
+                address: core::ptr::null(),
+                increment: true,
+            },
+            destination: Destination {
+                address: color_expand_tx.fifo_address().cast_mut().cast(),
+                increment: false,
+            },
+            tx_count: N as u32,
+            tx_req: TxReq::Pio0Tx0,
+            byte_swap: false,
+            start: false,
+        });
+        let dma_trig_addr: *mut u32 = color_expand_sm_dma.read_trig_addr().cast_mut().cast();
 
         let mut display = Display {
+            display_buffer,
             display_attr: PhantomData,
             width: TDispAttr::width(),
             height: TDispAttr::height(),
@@ -772,9 +822,12 @@ where
             backlight_pwm,
             dc_pin,
             cs_pin,
+            sck_pin,
+            mosi_pin,
             vsync_pin,
-            dma0: dma.ch0.id(),
-            dma1: dma.ch1.id(),
+            color_expand_sm_dma,
+            display_sm_dma,
+            dma_trig_addr,
         };
 
         display.set_backlight(40);
@@ -785,6 +838,9 @@ where
 
     pub fn flush<'a>(&mut self) {
         self.wait_for_vsync();
+
+        // Start the DMA channel that writes to the PIO state machine's TX FIFO
+        unsafe { *self.dma_trig_addr = self.display_buffer.buffer.as_ptr() as u32 };
     }
 
     pub fn set_backlight(&mut self, value: u8) {
@@ -817,3 +873,19 @@ where
         self.last_vsync_time = crate::time::time_us();
     }
 }
+
+pub struct PicoDisplay2_8(Display<Display2_8, 2400>);
+
+impl PicoDisplay2_8 {
+    pub fn new() -> Self {
+        Self(Display::<Display2_8, 2400>::new(MonochromeColor::Bpp1))
+    }
+
+    pub fn flush(&mut self) {
+        self.0.flush();
+    }
+}
+
+//pub type PicoDisplay2_0 = Display<Display2_0>;
+//pub type PicoDisplay1_14 = Display<Display1_14>;
+//pub type PicoDisplaySquare = Display<DisplaySquare>;
