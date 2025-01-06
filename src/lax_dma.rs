@@ -783,7 +783,7 @@ pub mod tests {
         const RGB_BPP: u8 = 12;
         let bpp = RGB_BPP / color as u8;
 
-        const SIZE: usize = 4;
+        const SIZE: usize = 8;
         let input_buffer: [u8; SIZE] = [0xaa; SIZE];
         let mut output_buffer: [u8; 12 * SIZE] = [0u8; 12 * SIZE]; // Max output size, each input bit repeated 12 times (greyscale RGB444)
 
