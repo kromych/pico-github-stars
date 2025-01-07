@@ -54,8 +54,14 @@ use rp2040_hal::gpio::PullDown;
 use rp2040_hal::gpio::*;
 use rp2040_hal::pio::PIOBuilder;
 use rp2040_hal::pio::PIOExt;
+use rp2040_hal::pio::PinDir;
+use rp2040_hal::pio::Running;
+use rp2040_hal::pio::StateMachine;
+use rp2040_hal::pio::SM0;
+use rp2040_hal::pio::SM1;
 use rp2040_hal::pwm;
 use rp2040_hal::Clock;
+use rp2040_pac::PIO0;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[allow(dead_code)]
@@ -371,13 +377,15 @@ where
 
     dc_pin: Pin<Gpio16, FunctionSioOutput, PullDown>,
     cs_pin: Pin<Gpio17, FunctionSioOutput, PullDown>,
-    sck_pin: Pin<Gpio18, FunctionSioOutput, PullDown>,
-    mosi_pin: Pin<Gpio19, FunctionSioOutput, PullDown>,
+    sck_pin: Pin<Gpio18, FunctionPio0, PullDown>,
+    mosi_pin: Pin<Gpio19, FunctionPio0, PullDown>,
     vsync_pin: Pin<Gpio21, FunctionSioInput, PullUp>,
 
     color_expand_sm_dma: LaxDmaWrite,
     display_sm_dma: LaxDmaWrite,
     dma_trig_addr: *mut u32,
+    color_expand_sm: StateMachine<(PIO0, SM0), Running>,
+    display_spi_sm: StateMachine<(PIO0, SM1), Running>,
 
     width: u16,
     height: u16,
@@ -413,7 +421,14 @@ fn gen_monochrome_pio_program(
 }
 
 fn rgb444_pio_program() -> pio::Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
-    pio_proc::pio_asm!("more:", "jmp more").program
+    pio_proc::pio_asm!(
+        ".side_set 1",
+        ".wrap_target",
+        "   out     pins, 1 side 0",
+        "   nop     side 1",
+        ".wrap",
+    )
+    .program
 }
 
 impl<TDispAttr, const N: usize> Display<TDispAttr, N>
@@ -745,30 +760,35 @@ where
             color,
         };
 
-        let (mut color_expand_sm, color_expand_rx, color_expand_tx) =
+        let (color_expand_sm, color_expand_rx, color_expand_tx) =
             PIOBuilder::from_installed_program(
                 pio.install(&gen_monochrome_pio_program(color)).unwrap(),
             )
             .autopull(true)
             .autopush(true)
+            .clock_divisor_fixed_point(1, 0)
             .build(sm0);
-        color_expand_sm.set_clock_divisor(1.0);
 
         defmt::info!("MOSI pin: {:?}", mosi_pin.id().num);
         defmt::info!("SCK pin: {:?}", sck_pin.id().num);
 
+        let mosi_pin = mosi_pin.into_function::<FunctionPio0>();
+        let sck_pin = sck_pin.into_function::<FunctionPio0>();
         let (mut display_spi_sm, _display_spi_rx, display_spi_tx) =
             PIOBuilder::from_installed_program(pio.install(&rgb444_pio_program()).unwrap())
                 .autopull(true)
                 .autopush(true)
+                .clock_divisor_fixed_point(1, 0)
                 .buffers(rp2040_hal::pio::Buffers::OnlyTx)
                 .set_pins(mosi_pin.id().num, 1)
+                .out_pins(mosi_pin.id().num, 1)
                 .side_set_pin_base(sck_pin.id().num)
                 .build(sm1);
-        display_spi_sm.set_clock_divisor(1.0);
+        display_spi_sm.set_pindirs([(mosi_pin.id().num, PinDir::Output)]);
+        display_spi_sm.set_pindirs([(sck_pin.id().num, PinDir::Output)]);
 
-        color_expand_sm.start();
-        display_spi_sm.start();
+        let color_expand_sm = color_expand_sm.start();
+        let display_spi_sm = display_spi_sm.start();
 
         // This DMA channel transfers data from the PIO state machine's
         // RX FIFO to the display. It will be stalled until the
@@ -828,6 +848,8 @@ where
             color_expand_sm_dma,
             display_sm_dma,
             dma_trig_addr,
+            color_expand_sm,
+            display_spi_sm,
         };
 
         display.set_backlight(40);
