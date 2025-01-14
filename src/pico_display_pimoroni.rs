@@ -37,7 +37,6 @@ use crate::lax_dma::Source;
 use crate::lax_dma::TxReq;
 use crate::lax_dma::TxSize;
 use core::marker::PhantomData;
-use core::usize;
 use cortex_m::asm::delay;
 use embedded_hal::digital::InputPin;
 use embedded_hal::digital::OutputPin;
@@ -266,6 +265,13 @@ struct MonochromeDisplayBuffer<const N: usize> {
     color: MonochromeColor,
 }
 
+type DisplayPins<MOSI, CLK, CS, DC> = (
+    Pin<MOSI, FunctionSioOutput, PullDown>,
+    Pin<CLK, FunctionSioOutput, PullDown>,
+    Pin<CS, FunctionSioOutput, PullDown>,
+    Pin<DC, FunctionSioOutput, PullDown>,
+);
+
 /// A manual SPI implementation for the Pico Display
 pub struct ManualDisplaySpi<MOSI, CLK, CS, DC>
 where
@@ -287,12 +293,8 @@ where
     CS: PinId,
     DC: PinId,
 {
-    pub fn new(
-        mosi: Pin<MOSI, FunctionSioOutput, PullDown>,
-        clk: Pin<CLK, FunctionSioOutput, PullDown>,
-        cs: Pin<CS, FunctionSioOutput, PullDown>,
-        dc: Pin<DC, FunctionSioOutput, PullDown>,
-    ) -> Self {
+    pub fn new(pins: DisplayPins<MOSI, CLK, CS, DC>) -> Self {
+        let (mosi, clk, cs, dc) = pins;
         Self { mosi, clk, cs, dc }
     }
 
@@ -347,14 +349,7 @@ where
     }
 
     /// Leaves the pins in the state that is suitable for sending data
-    fn release(
-        mut self,
-    ) -> (
-        Pin<MOSI, FunctionSioOutput, PullDown>,
-        Pin<CLK, FunctionSioOutput, PullDown>,
-        Pin<CS, FunctionSioOutput, PullDown>,
-        Pin<DC, FunctionSioOutput, PullDown>,
-    ) {
+    fn release(mut self) -> DisplayPins<MOSI, CLK, CS, DC> {
         self.dc.set_high().unwrap(); // Data/Command high for data
         self.cs.set_low().unwrap(); // Chip select active
 
@@ -376,7 +371,7 @@ where
     backlight_pwm: pwm::Channel<pwm::Slice<pwm::Pwm2, pwm::FreeRunning>, pwm::A>,
 
     dc_pin: Pin<Gpio16, FunctionSioOutput, PullDown>,
-    cs_pin: Pin<Gpio17, FunctionSioOutput, PullDown>,
+    cs_pin: Pin<Gpio17, FunctionPio0, PullDown>,
     sck_pin: Pin<Gpio18, FunctionPio0, PullDown>,
     mosi_pin: Pin<Gpio19, FunctionPio0, PullDown>,
     vsync_pin: Pin<Gpio21, FunctionSioInput, PullUp>,
@@ -404,9 +399,11 @@ fn gen_monochrome_pio_program(
     let bpp = color as u8;
 
     let mut repeat = a.label();
+    let mut more = a.label();
 
     // Pull `bpp` bits (1, 2, or 4) from the TX FIFO into OSR
     a.out(pio::OutDestination::X, bpp);
+    a.bind(&mut more);
 
     // Loop counter in `Y` to repeat `bpp` as many times as need
     // to fill RGB444 for the greyscale color.
@@ -414,18 +411,31 @@ fn gen_monochrome_pio_program(
     a.bind(&mut repeat);
     // Push the bits into ISR which goes into RX FIFO.
     a.r#in(pio::InSource::X, bpp);
-    // Repeat
+    // Repeat the bits
     a.jmp(pio::JmpCondition::YDecNonZero, &mut repeat);
+
+    //a.wait(1, pio::WaitSource::IRQ, 4, false);
+
+    // If there are more pixels to process, go back to the beginning
+    a.jmp(pio::JmpCondition::OutputShiftRegisterNotEmpty, &mut more);
 
     a.assemble_program()
 }
 
 fn rgb444_pio_program() -> pio::Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
+    // Pin assignments:
+    // - CSn is side-set bit 0
+    // - SCK is side-set bit 1
+    // - MOSI is OUT bit 0 (host-to-device)
+
     pio_proc::pio_asm!(
-        ".side_set 1",
+        ".side_set 2",
         ".wrap_target",
-        "   out     pins, 1 side 0",
-        "   nop     side 1",
+        "   set     y, 921600 side 2",
+        "   set     x, 0 side 0",
+        "bitloop:",
+        "   out     pins, 1 side 2",
+        "   jmp     y-- bitloop side 0",
         ".wrap",
     )
     .program
@@ -461,12 +471,9 @@ where
             &mut pac.RESETS,
         );
 
-        let mut red_led_pin: Pin<Gpio26, FunctionSio<SioOutput>, PullDown> =
-            pins.gpio26.into_push_pull_output();
-        let mut green_led_pin: Pin<Gpio27, FunctionSio<SioOutput>, PullDown> =
-            pins.gpio27.into_push_pull_output();
-        let mut blue_led_pin: Pin<Gpio28, FunctionSio<SioOutput>, PullDown> =
-            pins.gpio28.into_push_pull_output();
+        let mut red_led_pin = pins.gpio26.into_push_pull_output();
+        let mut green_led_pin = pins.gpio27.into_push_pull_output();
+        let mut blue_led_pin = pins.gpio28.into_push_pull_output();
 
         red_led_pin.set_high().unwrap();
         green_led_pin.set_high().unwrap();
@@ -495,7 +502,7 @@ where
 
         let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
 
-        let mut display = ManualDisplaySpi::new(mosi_pin, sck_pin, cs_pin, dc_pin);
+        let mut display = ManualDisplaySpi::new((mosi_pin, sck_pin, cs_pin, dc_pin));
 
         // Initialize display hardware
 
@@ -771,21 +778,33 @@ where
 
         defmt::info!("MOSI pin: {:?}", mosi_pin.id().num);
         defmt::info!("SCK pin: {:?}", sck_pin.id().num);
+        defmt::info!("CS pin: {:?}", cs_pin.id().num);
+        defmt::info!("DC pin: {:?}", dc_pin.id().num);
 
-        let mosi_pin = mosi_pin.into_function::<FunctionPio0>();
-        let sck_pin = sck_pin.into_function::<FunctionPio0>();
+        // Single-cycle I/O output pin
+        let base_pin = mosi_pin.id().num;
+        let pin_count = 1;
+        let mosi_pin = mosi_pin.into_function::<FunctionPio0>(); // Pin 19
+
+        // Side-set pins for the PIO state machine
+        let sck_pin = sck_pin.into_function::<FunctionPio0>(); // Pin 18
+        let cs_pin = cs_pin.into_function::<FunctionPio0>(); // Pin 17
+
         let (mut display_spi_sm, _display_spi_rx, display_spi_tx) =
             PIOBuilder::from_installed_program(pio.install(&rgb444_pio_program()).unwrap())
                 .autopull(true)
                 .autopush(true)
                 .clock_divisor_fixed_point(1, 0)
                 .buffers(rp2040_hal::pio::Buffers::OnlyTx)
-                .set_pins(mosi_pin.id().num, 1)
-                .out_pins(mosi_pin.id().num, 1)
-                .side_set_pin_base(sck_pin.id().num)
+                .set_pins(base_pin, pin_count)
+                .out_pins(base_pin, pin_count)
+                .side_set_pin_base(cs_pin.id().num)
                 .build(sm1);
-        display_spi_sm.set_pindirs([(mosi_pin.id().num, PinDir::Output)]);
-        display_spi_sm.set_pindirs([(sck_pin.id().num, PinDir::Output)]);
+        display_spi_sm.set_pindirs([
+            (mosi_pin.id().num, PinDir::Output),
+            (sck_pin.id().num, PinDir::Output),
+            (cs_pin.id().num, PinDir::Output),
+        ]);
 
         let color_expand_sm = color_expand_sm.start();
         let display_spi_sm = display_spi_sm.start();
@@ -858,7 +877,7 @@ where
         display
     }
 
-    pub fn flush<'a>(&mut self) {
+    pub fn flush(&mut self) {
         self.wait_for_vsync();
 
         // Start the DMA channel that writes to the PIO state machine's TX FIFO
