@@ -419,7 +419,7 @@ fn gen_monochrome_pio_program(
     //a.wait(1, pio::WaitSource::IRQ, 4, false);
 
     // If there are more pixels to process, go back to the beginning
-    a.jmp(pio::JmpCondition::OutputShiftRegisterNotEmpty, &mut more);
+    a.jmp(pio::JmpCondition::Always, &mut more);
 
     a.assemble_program()
 }
@@ -919,16 +919,30 @@ where
     pub fn flush(&mut self) {
         self.wait_for_vsync();
 
+        defmt::info!(
+            "N 0x{:x}, color DMA 0x{:x} remaining, display DMA 0x{:x} remaining",
+            N,
+            self.color_expand_sm_dma.tx_count_remaining(),
+            self.display_sm_dma.tx_count_remaining()
+        );
+
         // Start the DMA channel that writes to the PIO state machine's TX FIFO
         unsafe { *self.dma_trig_addr = self.display_buffer.buffer.as_ptr() as u32 };
 
+        defmt::info!(
+            "N 0x{:x}, color DMA 0x{:x} remaining, display DMA 0x{:x} remaining",
+            N,
+            self.color_expand_sm_dma.tx_count_remaining(),
+            self.display_sm_dma.tx_count_remaining()
+        );
+
         while !self.display_sm_dma.is_done() {
-            defmt::info!(
-                "N 0x{:x}, color DMA 0x{:x} remaining, display DMA 0x{:x} remaining",
-                N,
-                self.color_expand_sm_dma.tx_count_remaining(),
-                self.display_sm_dma.tx_count_remaining()
-            );
+            // defmt::info!(
+            //     "N 0x{:x}, color DMA 0x{:x} remaining, display DMA 0x{:x} remaining",
+            //     N,
+            //     self.color_expand_sm_dma.tx_count_remaining(),
+            //     self.display_sm_dma.tx_count_remaining()
+            // );
         }
         defmt::info!(
             "N 0x{:x}, color DMA 0x{:x} remaining, display DMA 0x{:x} remaining",
