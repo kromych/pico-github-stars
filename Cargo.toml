@@ -18,13 +18,14 @@ embedded-hal = "1.0"
 fugit = "0.3"
 pio = "0.2"
 pio-proc = "0.2"
+pico_pll_config = "0.1"
 rp2040-boot2 = "0.3"
 rp2040-hal = { version = "0.11", features = ["binary-info", "critical-section-impl", "rt", "defmt"] }
 rp2040-pac = "0.6"
 embedded-graphics = "0.8"
 libm = "0.2"
-rand = { version = "0.8",  default-features = false }
-rand_chacha = { version = "0.3.1", default-features = false }
+rand = { version = "0.9",  default-features = false }
+rand_chacha = { version = "0.9", default-features = false }
 
 [profile.release]
 debug = 2

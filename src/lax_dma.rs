@@ -137,6 +137,7 @@ pub struct Config {
     pub tx_count: u32,
     pub tx_req: TxReq,
     pub byte_swap: bool,
+    pub high_priority: bool,
     pub start: bool,
 }
 
@@ -175,6 +176,7 @@ impl LaxDmaWrite {
             w.treq_sel().bits(config.tx_req as u8);
             w.bswap().bit(config.byte_swap);
             w.chain_to().bits(CHIDCHAIN::id());
+            w.high_priority().bit(config.high_priority);
             w.en().bit(true);
             w
         });
@@ -293,6 +295,7 @@ pub mod tests {
 
         // Configure the DMA transfer
         let dma_config = lax_dma::Config {
+            high_priority: false,
             word_size,
             source: lax_dma::Source {
                 address: src.as_ptr(),
@@ -562,6 +565,7 @@ pub mod tests {
         // RX FIFO to the output buffer. It will be stalled until the
         // next DMA channel is started and feeds the PIO TX FIFO.
         let dma3 = LaxDmaWrite::new::<dma::CH3>(Config {
+            high_priority: false,
             word_size: TxSize::_32bit,
             source: Source {
                 address: rxf1.cast(),
@@ -581,6 +585,7 @@ pub mod tests {
         // RX FIFO to the output buffer. It will be stalled until the
         // next DMA channel is started and feeds the PIO TX FIFO.
         let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
+            high_priority: false,
             word_size: TxSize::_32bit,
             source: Source {
                 address: rxf0.cast(),
@@ -600,6 +605,7 @@ pub mod tests {
         // If this one is chained to dma0 (that writes to this channel's read trigger address),
         // the two will be res-starting together, running in the ping-pong mode.
         let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
+            high_priority: false,
             word_size: TxSize::_32bit,
             source: Source {
                 address: core::ptr::null(),
@@ -618,6 +624,7 @@ pub mod tests {
         // This DMA channel is used to configure the next one by writing to
         // the channel read address trigger register.
         let dma0 = LaxDmaWrite::new::<dma::CH0>(Config {
+            high_priority: false,
             word_size: TxSize::_32bit,
             source: Source {
                 address: input_buffer_addr.as_ptr().cast(),
@@ -704,6 +711,7 @@ pub mod tests {
 
         // This DMA channel transfers data from the input buffer to the PIO state machine's TX FIFO.
         let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
+            high_priority: false,
             word_size: TxSize::_32bit,
             source: Source {
                 address: input_buffer.as_ptr(),
@@ -722,6 +730,7 @@ pub mod tests {
         // This DMA channel transfers data from the PIO state machine's
         // RX FIFO to the output buffer
         let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
+            high_priority: false,
             word_size: TxSize::_32bit,
             source: Source {
                 address: rxf.cast(),
@@ -823,6 +832,7 @@ pub mod tests {
 
         // This DMA channel transfers data from the input buffer to the PIO state machine's TX FIFO.
         let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
+            high_priority: false,
             word_size: TxSize::_32bit,
             source: Source {
                 address: input_buffer.as_ptr(),
@@ -841,6 +851,7 @@ pub mod tests {
         // This DMA channel transfers data from the PIO state machine's
         // RX FIFO to the output buffer.
         let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
+            high_priority: false,
             word_size: TxSize::_32bit,
             source: Source {
                 address: rxf.cast(),

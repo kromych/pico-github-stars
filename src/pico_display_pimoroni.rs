@@ -58,6 +58,7 @@ use rp2040_hal::pio::Running;
 use rp2040_hal::pio::StateMachine;
 use rp2040_hal::pio::SM0;
 use rp2040_hal::pio::SM1;
+use rp2040_hal::pll::PLLConfig;
 use rp2040_hal::pwm;
 use rp2040_hal::Clock;
 use rp2040_pac::PIO0;
@@ -379,6 +380,7 @@ where
     color_expand_sm_dma: LaxDmaWrite,
     display_sm_dma: LaxDmaWrite,
     dma_trig_addr: *mut u32,
+    // Using different PIO blocks to not share the bandwidth
     color_expand_sm: StateMachine<(PIO0, SM0), Running>,
     display_spi_sm: StateMachine<(PIO0, SM1), Running>,
 
@@ -401,7 +403,7 @@ fn gen_monochrome_pio_program(
     let mut repeat = a.label();
     let mut more = a.label();
 
-    // Pull `bpp` bits (1, 2, or 4) from the TX FIFO into OSR
+    // Pull `bpp` bits (1, 2, or 4) from the TX FIFO into OSR and to X
     a.out(pio::OutDestination::X, bpp);
     a.bind(&mut more);
 
@@ -441,6 +443,34 @@ fn rgb444_pio_program() -> pio::Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
     .program
 }
 
+fn _set_vreg_voltage(pac: &rp2040_pac::Peripherals) {
+    /// Possible voltage values
+    const VREG_VOLTAGE_0_85: u8 = 6; // 0.85V
+    const VREG_VOLTAGE_0_90: u8 = 7; // 0.90V
+    const VREG_VOLTAGE_0_95: u8 = 8; // 0.95V
+    const VREG_VOLTAGE_1_00: u8 = 9; // 1.00V
+    const VREG_VOLTAGE_1_05: u8 = 10; // 1.05V
+    const VREG_VOLTAGE_1_10: u8 = 11; // 1.10V *default state
+    const VREG_VOLTAGE_1_15: u8 = 12; // 1.15V
+    const VREG_VOLTAGE_1_20: u8 = 13; // 1.20V
+    const VREG_VOLTAGE_1_25: u8 = 14; // 1.25V
+    const VREG_VOLTAGE_1_30: u8 = 15; // 1.30V
+    const VREG_VOLTAGE_MIN: u8 = VREG_VOLTAGE_0_85; // minimum voltage
+    const VREG_VOLTAGE_DEF: u8 = VREG_VOLTAGE_1_10; // default voltage after power up
+    const VREG_VOLTAGE_MAX: u8 = VREG_VOLTAGE_1_30; // maximum voltage
+
+    // A voltmod might be required for a stable 250MHz operation
+    unsafe {
+        pac.VREG_AND_CHIP_RESET
+            .vreg()
+            .modify(|_, w| w.vsel().bits(VREG_VOLTAGE_1_10));
+    }
+    // Delay for the voltage to stabilize
+    cortex_m::asm::delay(10_000);
+}
+
+const _PLL_250MHZ: PLLConfig = pico_pll_config::pll_config!(250_000).unwrap();
+
 impl<TDispAttr, const N: usize> Display<TDispAttr, N>
 where
     TDispAttr: DisplayAttributes,
@@ -449,6 +479,13 @@ where
         let display_kind = TDispAttr::kind();
         let mut pac = rp2040_pac::Peripherals::take().unwrap();
         let core = rp2040_pac::CorePeripherals::take().unwrap();
+
+        // Give more priority to the DMA peripheral
+        pac.BUSCTRL.bus_priority().write(|w| {
+            w.dma_r().set_bit();
+            w.dma_w().set_bit()
+        });
+
         let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
 
         let clocks = rp2040_hal::clocks::init_clocks_and_plls(
@@ -813,6 +850,7 @@ where
         // RX FIFO to the display. It will be stalled until the
         // next DMA channel is started and feeds the PIO TX FIFO.
         let display_sm_dma = LaxDmaWrite::new::<dma::CH2>(Config {
+            high_priority: true,
             word_size: TxSize::_32bit,
             source: Source {
                 address: color_expand_rx.fifo_address().cast(),
@@ -832,6 +870,7 @@ where
         // If this one is chained to dma0 (that writes to this channel's read trigger address),
         // the two will be res-starting together, running in the ping-pong mode.
         let color_expand_sm_dma = LaxDmaWrite::new::<dma::CH1>(Config {
+            high_priority: true,
             word_size: TxSize::_32bit,
             source: Source {
                 address: core::ptr::null(),
@@ -882,6 +921,23 @@ where
 
         // Start the DMA channel that writes to the PIO state machine's TX FIFO
         unsafe { *self.dma_trig_addr = self.display_buffer.buffer.as_ptr() as u32 };
+
+        while !self.display_sm_dma.is_done() {
+            defmt::info!(
+                "N 0x{:x}, color DMA 0x{:x} remaining, display DMA 0x{:x} remaining",
+                N,
+                self.color_expand_sm_dma.tx_count_remaining(),
+                self.display_sm_dma.tx_count_remaining()
+            );
+        }
+        defmt::info!(
+            "N 0x{:x}, color DMA 0x{:x} remaining, display DMA 0x{:x} remaining",
+            N,
+            self.color_expand_sm_dma.tx_count_remaining(),
+            self.display_sm_dma.tx_count_remaining()
+        );
+
+        defmt::info!("Dispaly DMA done");
     }
 
     pub fn set_backlight(&mut self, value: u8) {
