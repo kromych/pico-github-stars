@@ -1,0 +1,24 @@
+[package]
+name = "pico-display"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+test = false
+bench = false
+
+[dependencies]
+cortex-m = "0.7"
+defmt = "1.0"
+embedded-hal = "1.0"
+fugit = "0.3"
+libm = "0.2"
+pio = "0.3"
+pio-proc = "0.3"
+pio-programs = { path = "../pio-programs" }
+pico_pll_config = "0.1"
+rp2040-hal = { git = "https://github.com/rp-rs/rp-hal/", rev = "b3cd286e1bbb6de9ffa071d9b654ab71038df9b0", features = [
+    "critical-section-impl",
+    "defmt",
+] }
+rp2040-pac = "0.6"

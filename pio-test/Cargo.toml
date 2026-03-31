@@ -1,0 +1,8 @@
+[package]
+name = "pio-test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pio = "0.3"
+pio-programs = { path = "../pio-programs" }

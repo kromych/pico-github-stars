@@ -1,5 +1,5 @@
 /// Palette data [[r, g, b]; 256]:
-const _PALETTE_24BIT: [[u8; 3]; 256] = [
+pub static PALETTE_24BIT: [[u8; 3]; 256] = [
     [0x0, 0x0, 0x0],
     [0x0, 0x20, 0x8],
     [0x0, 0x1a, 0x6],
@@ -266,7 +266,7 @@ const _PALETTE_24BIT: [[u8; 3]; 256] = [
 // rgb565 = (r << 11) | (g << 5) | b
 // rgb565_be = ((rgb565 & 0xff) << 8) | ((rgb565 & 0xff00) >> 8)
 // ```
-pub const PALETTE_565BE: [u16; 256] = [
+pub const _PALETTE_565BE: [u16; 256] = [
     0x0, 0x101, 0xc000, 0x8000, 0x2101, 0x8000, 0x4101, 0xe000, 0x4000, 0xa000, 0xa209, 0xc100,
     0x6000, 0xc100, 0xa101, 0x101, 0x6101, 0x4101, 0x220a, 0xe100, 0x8312, 0xe312, 0xc000, 0x8211,
     0xc311, 0x735, 0xc523, 0x831a, 0xa523, 0x631a, 0xc83c, 0xc103, 0x10b, 0xc109, 0xc001, 0x8001,
@@ -297,7 +297,7 @@ pub const GLYPH_COUNT: usize = 26;
 pub const BRIGHTNESS_LEVELS: usize = 6;
 
 /// Glyph data, 14x14 pixels, 26 symbols, 6 levels of brightness [[[[palette_index] * 14] * 14] * 26] * 6:
-pub const GLYPHS: [[[[u8; GLYPH_WIDTH]; GLYPH_HEIGHT]; GLYPH_COUNT]; BRIGHTNESS_LEVELS] = [
+pub static GLYPHS: [[[[u8; GLYPH_WIDTH]; GLYPH_HEIGHT]; GLYPH_COUNT]; BRIGHTNESS_LEVELS] = [
     [
         [
             [
@@ -7176,12 +7176,12 @@ pub const GLYPHS: [[[[u8; GLYPH_WIDTH]; GLYPH_HEIGHT]; GLYPH_COUNT]; BRIGHTNESS_
     ],
 ];
 
-pub fn get_matrix_symbol_rgb565(index: u8, brightness: u8, symbol_data: &mut [u16]) {
+pub fn _get_matrix_symbol_rgb565(index: u8, brightness: u8, symbol_data: &mut [u16]) {
     let glyph_data = &GLYPHS[brightness as usize][index as usize];
     for y in 0..GLYPH_HEIGHT {
         for x in 0..GLYPH_WIDTH {
             let palette_index = glyph_data[y][x];
-            symbol_data[x + y * GLYPH_WIDTH] = PALETTE_565BE[palette_index as usize];
+            symbol_data[x + y * GLYPH_WIDTH] = _PALETTE_565BE[palette_index as usize];
         }
     }
 }

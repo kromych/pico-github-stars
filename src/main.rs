@@ -3,15 +3,8 @@
 
 use defmt_rtt as _;
 use panic_probe as _;
-use pico_display_pimoroni::MonochromeColor;
-use pico_display_pimoroni::PicoDisplay2_8;
+use pico_display::{Display2_8, PicoDisplay, Rgb565};
 use rp2040_hal::rom_data;
-
-mod lax_dma;
-mod pico_display_pimoroni;
-mod rng;
-
-const XOSC_CRYSTAL_FREQ: u32 = 12_000_000;
 
 /// The linker will place this boot block at the start of our program image. We
 /// need this to help the ROM bootloader get our code up and running.
@@ -31,44 +24,22 @@ pub static PICOTOOL_ENTRIES: [rp2040_hal::binary_info::EntryAddr; 4] = [
     rp2040_hal::binary_info::rp_cargo_version!(),
 ];
 
-#[allow(dead_code)]
-mod time {
-    pub fn time_us() -> u32 {
-        unsafe { (*rp2040_pac::TIMER::PTR).timerawl().read().bits() }
-    }
-
-    pub fn time_us64() -> u64 {
-        unsafe {
-            (*rp2040_pac::TIMER::PTR).timelr().read().bits() as u64
-                | (((*rp2040_pac::TIMER::PTR).timehr().read().bits() as u64) << 32)
-        }
-    }
-}
-
-const DISPLAY_WIDTH: u16 = 320;
-const DISPLAY_HEIGHT: u16 = 240;
-const DISPLAY_COLOR: MonochromeColor = MonochromeColor::Bpp1;
-const DISPLAY_BUFFER_SIZE: usize =
-    (DISPLAY_WIDTH as usize) * (DISPLAY_HEIGHT as usize) / DISPLAY_COLOR.pixel_per_byte() as usize;
+type MyDisplay = PicoDisplay<Display2_8, Rgb565>;
 
 #[rp2040_hal::entry]
 fn main() -> ! {
+    let mut display = pico_display::pico_display_new!(MyDisplay);
+
     defmt::info!(
-        "Board {}, git revision {:x}, ROM verion {:x}, time {:x} us",
+        "Board {}, git revision {:x}",
         rom_data::copyright_string(),
         rom_data::git_revision(),
-        rom_data::rom_version_number(),
-        time::time_us64()
     );
 
-    defmt::info!("Display size: {}x{}", DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    defmt::info!("Display buffer size: {}", DISPLAY_BUFFER_SIZE);
-
-    let mut display = PicoDisplay2_8::new();
+    display.clear();
     display.flush();
 
     loop {
-        cortex_m::asm::wfe();
-        defmt::info!("WFE time: {:x}", time::time_us64());
+        cortex_m::asm::wfi();
     }
 }

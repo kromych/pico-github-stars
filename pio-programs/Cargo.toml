@@ -1,0 +1,12 @@
+[package]
+name = "pio-programs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+test = false
+bench = false
+
+[dependencies]
+pio = "0.3"
+pio-proc = "0.3"

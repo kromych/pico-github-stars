@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "pico-display", "pio-programs", "pio-test"]
+default-members = [".", "pico-display", "pio-programs"]
+
 [package]
 edition = "2021"
 name = "pico-github-stars"
@@ -6,26 +10,54 @@ version = "0.1.0"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-bitfield-struct = "0.10"
-defmt = "0.3"
-defmt-rtt = "0.4"
-panic-probe = { version = "0.3", features = ["print-defmt"] }
-portable-atomic = {version = "1.7.0", features = ["critical-section"]}
+defmt = "1.0"
+defmt-rtt = "1.1"
+panic-probe = { version = "1.0", features = ["print-defmt"] }
 
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 embedded-hal = "1.0"
 fugit = "0.3"
-pio = "0.2"
-pio-proc = "0.2"
+pio = "0.3"
+pio-proc = "0.3"
+pico-display = { path = "pico-display" }
+pio-programs = { path = "pio-programs" }
 pico_pll_config = "0.1"
 rp2040-boot2 = "0.3"
-rp2040-hal = { version = "0.11", features = ["binary-info", "critical-section-impl", "rt", "defmt"] }
+rp2040-hal = { git = "https://github.com/rp-rs/rp-hal/", rev = "b3cd286e1bbb6de9ffa071d9b654ab71038df9b0", features = [
+    "binary-info",
+    "critical-section-impl",
+    "rt",
+    "defmt",
+] }
 rp2040-pac = "0.6"
 embedded-graphics = "0.8"
 libm = "0.2"
-rand = { version = "0.9",  default-features = false }
-rand_chacha = { version = "0.9", default-features = false }
+
+[[bin]]
+name = "pico-github-stars"
+test = false
+bench = false
+
+[[example]]
+name = "matrix"
+test = false
+bench = false
+
+[[example]]
+name = "color_bars"
+test = false
+bench = false
+
+[[example]]
+name = "bounce"
+test = false
+bench = false
+
+[[example]]
+name = "dma_tests"
+test = false
+bench = false
 
 [profile.release]
 debug = 2
