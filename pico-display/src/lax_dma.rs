@@ -1,6 +1,6 @@
 //! Very unsafe DMA driver for experimental purposes.
 
-use rp2040_hal::dma;
+use embassy_rp::pac;
 
 #[allow(dead_code)]
 #[derive(Copy, Clone)]
@@ -116,24 +116,12 @@ impl From<u8> for TxReq {
 }
 
 #[derive(Copy, Clone)]
-
-pub struct Source {
-    pub address: *const u8,
-    pub increment: bool,
-}
-
-#[derive(Copy, Clone)]
-
-pub struct Destination {
-    pub address: *mut u8,
-    pub increment: bool,
-}
-#[derive(Copy, Clone)]
-
 pub struct Config {
     pub word_size: TxSize,
-    pub source: Source,
-    pub destination: Destination,
+    pub src_addr: u32,
+    pub src_incr: bool,
+    pub dest_addr: u32,
+    pub dest_incr: bool,
     pub tx_count: u32,
     pub tx_req: TxReq,
     pub byte_swap: bool,
@@ -144,68 +132,65 @@ pub struct Config {
 pub struct LaxDmaWrite {
     ch_id: u8,
     ch_id_chain: u8,
-    ch: &'static rp2040_pac::dma::ch::CH,
 }
 
-/// Create a new DMA channel with the given configuration.
-/// NOTE: be sure to reset the DMA system before using this function.
-/// ```ignore
-/// let dma = pac.DMA.split(&mut pac.RESETS);
-/// ```
 impl LaxDmaWrite {
-    pub fn new<CHID: dma::ChannelIndex>(config: Config) -> Self {
-        LaxDmaWrite::new_chained::<CHID, CHID>(config)
+    fn ch(&self) -> pac::dma::Channel {
+        pac::DMA.ch(self.ch_id as usize)
     }
 
-    pub fn new_chained<CHID: dma::ChannelIndex, CHIDCHAIN: dma::ChannelIndex>(
-        config: Config,
-    ) -> Self {
-        let ch = unsafe { (*rp2040_pac::DMA::PTR).ch(CHID::id() as usize) };
+    /// Create a new DMA channel with the given configuration.
+    /// NOTE: the DMA peripheral must be initialized before using this
+    /// (embassy_rp::init handles this).
+    pub fn new(ch_id: u8, config: Config) -> Self {
+        LaxDmaWrite::new_chained(ch_id, ch_id, config)
+    }
 
-        let (src, src_incr) = (config.source.address, config.source.increment);
-        let (dest, dest_incr) = (config.destination.address, config.destination.increment);
+    pub fn new_chained(ch_id: u8, ch_id_chain: u8, config: Config) -> Self {
+        let ch = pac::DMA.ch(ch_id as usize);
 
         cortex_m::asm::dsb();
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
-        ch.ch_al1_ctrl().reset();
-        ch.ch_al1_ctrl().write(|w| unsafe {
-            w.data_size().bits(config.word_size as u8);
-            w.incr_read().bit(src_incr);
-            w.incr_write().bit(dest_incr);
-            w.treq_sel().bits(config.tx_req as u8);
-            w.bswap().bit(config.byte_swap);
-            w.chain_to().bits(CHIDCHAIN::id());
-            w.high_priority().bit(config.high_priority);
-            w.en().bit(true);
-            w
+        ch.read_addr().write_value(config.src_addr);
+        ch.write_addr().write_value(config.dest_addr);
+        ch.trans_count().write_value(config.tx_count);
+
+        // Build the control register value using the typed CtrlTrig helper,
+        // then write it via al1_ctrl (non-triggering alias at offset 0x10).
+        // Writing ctrl_trig (offset 0x0C) would auto-start the channel.
+        let mut ctrl = pac::dma::regs::CtrlTrig(0);
+        ctrl.set_data_size(match config.word_size {
+            TxSize::_8bit => pac::dma::vals::DataSize::SIZE_BYTE,
+            TxSize::_16bit => pac::dma::vals::DataSize::SIZE_HALFWORD,
+            TxSize::_32bit => pac::dma::vals::DataSize::SIZE_WORD,
         });
-        ch.ch_read_addr().write(|w| unsafe { w.bits(src as u32) });
-        ch.ch_trans_count()
-            .write(|w| unsafe { w.bits(config.tx_count) });
+        ctrl.set_incr_read(config.src_incr);
+        ctrl.set_incr_write(config.dest_incr);
+        ctrl.set_treq_sel(pac::dma::vals::TreqSel::from_bits(config.tx_req as u8));
+        ctrl.set_bswap(config.byte_swap);
+        ctrl.set_chain_to(ch_id_chain);
+        ctrl.set_high_priority(config.high_priority);
+        ctrl.set_en(true);
+        ch.al1_ctrl().write_value(ctrl.0);
+
         if config.start {
-            ch.ch_al2_write_addr_trig()
-                .write(|w| unsafe { w.bits(dest as u32) });
-        } else {
-            ch.ch_write_addr().write(|w| unsafe { w.bits(dest as u32) });
+            // Write dest address via trigger alias to start the transfer.
+            ch.al2_write_addr_trig().write_value(config.dest_addr);
         }
 
-        Self {
-            ch_id: CHID::id(),
-            ch_id_chain: CHIDCHAIN::id(),
-            ch,
-        }
+        Self { ch_id, ch_id_chain }
     }
 
     pub fn trigger(&self) {
-        let channel_flags = 1 << self.ch_id | 1 << self.ch_id_chain;
-        unsafe { &*rp2040_pac::DMA::ptr() }
-            .multi_chan_trigger()
-            .write(|w| unsafe { w.bits(channel_flags) });
+        let channel_flags = (1u16 << self.ch_id) | (1u16 << self.ch_id_chain);
+        pac::DMA.multi_chan_trigger().write(|w| {
+            w.set_multi_chan_trigger(channel_flags);
+        });
     }
 
     pub fn is_done(&self) -> bool {
-        !self.ch.ch_al1_ctrl().read().busy().bit_is_set()
+        !self.ch().ctrl_trig().read().busy()
     }
 
     pub fn wait(&self) {
@@ -216,42 +201,44 @@ impl LaxDmaWrite {
     }
 
     pub fn read_error(&self) -> bool {
-        self.ch.ch_al1_ctrl().read().read_error().bit_is_set()
+        self.ch().ctrl_trig().read().read_error()
     }
 
     pub fn last_read_addr(&self) -> u32 {
-        self.ch.ch_read_addr().read().bits()
+        self.ch().read_addr().read()
     }
 
     pub fn write_error(&self) -> bool {
-        self.ch.ch_al1_ctrl().read().write_error().bit_is_set()
+        self.ch().ctrl_trig().read().write_error()
     }
 
     pub fn last_write_addr(&self) -> u32 {
-        self.ch.ch_write_addr().read().bits()
+        self.ch().write_addr().read()
     }
 
     pub fn tx_count_remaining(&self) -> u32 {
-        self.ch.ch_trans_count().read().bits()
+        self.ch().trans_count().read()
     }
 
-    pub fn read_trig_addr(&self) -> *const u8 {
-        self.ch.ch_al3_read_addr_trig().as_ptr() as *const u8
+    /// Set the read address and trigger the transfer.
+    pub fn set_read_addr_trigger(&self, addr: u32) {
+        self.ch().al3_read_addr_trig().write_value(addr);
+    }
+
+    /// Return the address of the al3_read_addr_trig register (for DMA chaining).
+    pub fn read_addr_trig_register_addr(&self) -> u32 {
+        self.ch().al3_read_addr_trig().as_ptr() as u32
     }
 
     /// Set the transfer count without triggering.
     pub fn set_transfer_count(&self, tx_count: u32) {
-        self.ch
-            .ch_trans_count()
-            .write(|w| unsafe { w.bits(tx_count) });
+        self.ch().trans_count().write_value(tx_count);
     }
 
     /// Re-arm the channel with a new transfer count and trigger it.
     /// The read/write addresses and control register are left unchanged.
     pub fn restart(&self, tx_count: u32) {
-        self.ch
-            .ch_trans_count()
-            .write(|w| unsafe { w.bits(tx_count) });
+        self.ch().trans_count().write_value(tx_count);
         self.trigger();
     }
 }
@@ -259,6 +246,7 @@ impl LaxDmaWrite {
 impl Drop for LaxDmaWrite {
     fn drop(&mut self) {
         self.wait();
-        self.ch.ch_al1_ctrl().reset();
+        // Disable the channel via non-triggering alias
+        self.ch().al1_ctrl().write_value(0);
     }
 }

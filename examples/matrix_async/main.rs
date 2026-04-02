@@ -1,4 +1,7 @@
-//! Matrix digital rain screensaver.
+//! Matrix digital rain screensaver (async version).
+//!
+//! Same as `matrix` but uses `flush_async()` to yield to the executor
+//! between frames, allowing other embassy tasks to run.
 
 #![no_std]
 #![no_main]
@@ -8,7 +11,9 @@ use embassy_rp::pac;
 use panic_probe as _;
 use pico_display::{Display2_8, PicoDisplay, Rgb565};
 
+#[path = "../matrix/matrix.rs"]
 mod matrix;
+#[path = "../matrix/matrix_symbols.rs"]
 mod matrix_symbols;
 
 type MyDisplay = PicoDisplay<Display2_8, Rgb565>;
@@ -27,15 +32,15 @@ async fn main(_spawner: embassy_executor::Spawner) {
 
     let mut display = pico_display::pico_display_new!(MyDisplay);
 
-    defmt::info!("Matrix screensaver, time {} us", time_us64());
+    defmt::info!("Matrix async screensaver, time {} us", time_us64());
 
     let seed = time_us();
     let mut matrix = matrix::Matrix::new(seed);
 
-    defmt::info!("Matrix screensaver started, seed={}", seed);
+    defmt::info!("Matrix async screensaver started, seed={}", seed);
 
     loop {
         matrix.step(&mut display);
-        display.flush();
+        display.flush_async().await;
     }
 }

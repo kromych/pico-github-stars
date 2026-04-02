@@ -6,6 +6,7 @@ target = "thumbv6m-none-eabi"        # Cortex-M0 and Cortex-M0+
 
 [env]
 DEFMT_LOG = "info"
+EMBASSY_EXECUTOR_TASK_ARENA_SIZE = "65536"
 WIFI_NETWORK = "ssid"
 WIFI_PASSWORD = "pwd"
 HOST = "api.github.com"

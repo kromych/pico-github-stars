@@ -9,28 +9,56 @@
 #![allow(dead_code)]
 
 use defmt_rtt as _;
+use embassy_rp::pac;
 use panic_probe as _;
-use pico_display::lax_dma::{self, Config, Destination, LaxDmaWrite, Source, TxReq, TxSize};
+use pico_display::lax_dma::{self, Config, LaxDmaWrite, TxReq, TxSize};
 use pico_display::MonochromeColor;
-use rp2040_hal::dma;
-use rp2040_hal::dma::DMAExt;
-use rp2040_hal::pio::PIOExt;
-use rp2040_hal::rom_data;
 
-use pico_display::XOSC_CRYSTAL_FREQ;
+// ── PIO program loading helper ─────────────────────────────────────────────
 
-#[link_section = ".boot2"]
-#[used]
-pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
+/// Load a PIO program into PIO0 instruction memory at the given offset.
+/// Returns the number of instructions written.
+fn load_pio_program(
+    program: &pio::Program<{ pio::RP2040_MAX_PROGRAM_SIZE }>,
+    offset: usize,
+) -> usize {
+    let pio0 = pac::PIO0;
+    for (i, &instr) in program.code.iter().enumerate() {
+        pio0.instr_mem(offset + i).write(|w| w.set_instr_mem(instr));
+    }
+    program.code.len()
+}
 
-#[link_section = ".bi_entries"]
-#[used]
-pub static PICOTOOL_ENTRIES: [rp2040_hal::binary_info::EntryAddr; 4] = [
-    rp2040_hal::binary_info::rp_program_name!(c"DmaTests"),
-    rp2040_hal::binary_info::rp_program_description!(c"On-device DMA test suite"),
-    rp2040_hal::binary_info::rp_program_build_attribute!(),
-    rp2040_hal::binary_info::rp_cargo_version!(),
-];
+/// Reset PIO0: disable all SMs, restart them, clear FIFOs and instruction memory.
+fn reset_pio0() {
+    let pio0 = pac::PIO0;
+
+    // Disable all state machines
+    pio0.ctrl().write(|w| w.set_sm_enable(0));
+
+    // Restart all SMs (clears internal state)
+    pio0.ctrl().write(|w| {
+        w.set_sm_restart(0xF);
+        w.set_clkdiv_restart(0xF);
+    });
+
+    // Clear instruction memory
+    for i in 0..32 {
+        pio0.instr_mem(i).write(|w| w.set_instr_mem(0));
+    }
+
+    // Reset SM configs
+    for sm_idx in 0..4 {
+        let sm = pio0.sm(sm_idx);
+        sm.clkdiv().write(|w| {
+            w.set_int(1);
+            w.set_frac(0);
+        });
+        sm.shiftctrl().write(|_| {});
+        sm.execctrl().write(|_| {});
+        sm.pinctrl().write(|_| {});
+    }
+}
 
 // ── Memory-to-memory DMA tests ────────────────────────────────────────────
 
@@ -45,7 +73,7 @@ struct TestConfig {
     test_name: &'static str,
 }
 
-fn run_dma_test<CHID: dma::ChannelIndex>(config: TestConfig) {
+fn run_dma_test(ch_id: u8, config: TestConfig) {
     let TestConfig {
         src,
         dst,
@@ -57,7 +85,7 @@ fn run_dma_test<CHID: dma::ChannelIndex>(config: TestConfig) {
         test_name,
     } = config;
 
-    defmt::info!("*** Running DMA test {}, channel {}", test_name, CHID::id());
+    defmt::info!("*** Running DMA test {}, channel {}", test_name, ch_id);
 
     let tx_count = match word_size {
         lax_dma::TxSize::_8bit => dst.len() as u32,
@@ -68,21 +96,17 @@ fn run_dma_test<CHID: dma::ChannelIndex>(config: TestConfig) {
     let dma_config = Config {
         high_priority: false,
         word_size,
-        source: Source {
-            address: src.as_ptr(),
-            increment: increment_src,
-        },
-        destination: Destination {
-            address: dst.as_mut_ptr(),
-            increment: increment_dst,
-        },
+        src_addr: src.as_ptr() as u32,
+        src_incr: increment_src,
+        dest_addr: dst.as_mut_ptr() as u32,
+        dest_incr: increment_dst,
         tx_count,
         tx_req: TxReq::Permanent,
         byte_swap,
         start: false,
     };
 
-    let dma = LaxDmaWrite::new::<CHID>(dma_config);
+    let dma = LaxDmaWrite::new(ch_id, dma_config);
 
     defmt::debug!("DMA source addr: {:x}", src.as_ptr() as usize);
     defmt::debug!("DMA dest addr: {:x}", dst.as_ptr() as usize);
@@ -245,7 +269,7 @@ fn run_mem_to_mem_tests() {
     ];
 
     for test in tests.into_iter() {
-        run_dma_test::<dma::CH5>(test);
+        run_dma_test(5, test);
     }
 }
 
@@ -257,113 +281,114 @@ fn test_with_pio_invert_twice() {
     let mut output_buffer = [0u8; SIZE];
     let input_buffer_addr = [input_buffer.as_ptr() as u32];
 
-    let mut pac = rp2040_pac::Peripherals::take().unwrap();
-    let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
+    reset_pio0();
 
-    let _clocks = rp2040_hal::clocks::init_clocks_and_plls(
-        XOSC_CRYSTAL_FREQ,
-        pac.XOSC,
-        pac.CLOCKS,
-        pac.PLL_SYS,
-        pac.PLL_USB,
-        &mut pac.RESETS,
-        &mut watchdog,
-    )
-    .ok()
-    .unwrap();
+    let pio0 = pac::PIO0;
 
+    // Load programs into instruction memory
     let invert_pio = pio_programs::invert_pio_program();
     let invert_pio_again = pio_programs::invert_pio_again_program();
+    let prog0_len = load_pio_program(&invert_pio, 0);
+    load_pio_program(&invert_pio_again, prog0_len);
 
-    let _dma = pac.DMA.split(&mut pac.RESETS);
-    let (mut pio, sm0, sm1, _, _) = pac.PIO0.split(&mut pac.RESETS);
+    // Configure SM0: invert program (no autopull, no autopush)
+    let sm0 = pio0.sm(0);
+    sm0.clkdiv().write(|w| {
+        w.set_int(1);
+        w.set_frac(0);
+    });
+    sm0.shiftctrl().write(|w| {
+        w.set_autopull(false);
+        w.set_autopush(false);
+    });
+    sm0.execctrl().write(|w| {
+        w.set_wrap_top(invert_pio.wrap.source);
+        w.set_wrap_bottom(invert_pio.wrap.target);
+    });
+    // JMP to program start
+    sm0.instr().write(|w| w.set_instr(0x0000));
 
-    let (sm0, rx0, tx0) =
-        rp2040_hal::pio::PIOBuilder::from_installed_program(pio.install(&invert_pio).unwrap())
-            .autopull(false)
-            .autopush(false)
-            .build(sm0);
-    sm0.start();
+    // Configure SM1: invert_again program (no autopull, no autopush)
+    let sm1 = pio0.sm(1);
+    sm1.clkdiv().write(|w| {
+        w.set_int(1);
+        w.set_frac(0);
+    });
+    sm1.shiftctrl().write(|w| {
+        w.set_autopull(false);
+        w.set_autopush(false);
+    });
+    sm1.execctrl().write(|w| {
+        w.set_wrap_top(prog0_len as u8 + invert_pio_again.wrap.source);
+        w.set_wrap_bottom(prog0_len as u8 + invert_pio_again.wrap.target);
+    });
+    // JMP to program start
+    sm1.instr().write(|w| w.set_instr(prog0_len as u16));
 
-    let (sm1, rx1, tx1) = rp2040_hal::pio::PIOBuilder::from_installed_program(
-        pio.install(&invert_pio_again).unwrap(),
-    )
-    .autopull(false)
-    .autopush(false)
-    .build(sm1);
-    sm1.start();
+    // Enable both SMs
+    pio0.ctrl().modify(|w| {
+        w.set_sm_enable(w.sm_enable() | 0b11);
+    });
 
-    let txf0 = tx0.fifo_address();
-    let rxf0 = rx0.fifo_address();
-
-    let txf1 = tx1.fifo_address();
-    let rxf1 = rx1.fifo_address();
+    // FIFO addresses
+    let txf0_addr = pio0.txf(0).as_ptr() as u32;
+    let rxf0_addr = pio0.rxf(0).as_ptr() as u32;
+    let txf1_addr = pio0.txf(1).as_ptr() as u32;
+    let rxf1_addr = pio0.rxf(1).as_ptr() as u32;
 
     defmt::info!("input_buffer: {:08b}", input_buffer);
     defmt::info!("output_buffer: {:08b}", output_buffer);
 
-    let dma3 = LaxDmaWrite::new::<dma::CH3>(Config {
+    // DMA3: SM1 RX → output buffer
+    let dma3 = LaxDmaWrite::new(3, Config {
         high_priority: false,
         word_size: TxSize::_32bit,
-        source: Source {
-            address: rxf1.cast(),
-            increment: false,
-        },
-        destination: Destination {
-            address: output_buffer.as_mut_ptr(),
-            increment: true,
-        },
+        src_addr: rxf1_addr,
+        src_incr: false,
+        dest_addr: output_buffer.as_mut_ptr() as u32,
+        dest_incr: true,
         tx_count: SIZE as u32 / 4,
         tx_req: TxReq::Pio0Rx1,
         byte_swap: false,
         start: true,
     });
 
-    let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
+    // DMA2: SM0 RX → SM1 TX
+    let dma2 = LaxDmaWrite::new(2, Config {
         high_priority: false,
         word_size: TxSize::_32bit,
-        source: Source {
-            address: rxf0.cast(),
-            increment: false,
-        },
-        destination: Destination {
-            address: txf1.cast_mut().cast(),
-            increment: false,
-        },
+        src_addr: rxf0_addr,
+        src_incr: false,
+        dest_addr: txf1_addr,
+        dest_incr: false,
         tx_count: SIZE as u32 / 4,
         tx_req: TxReq::Pio0Tx1,
         byte_swap: false,
         start: true,
     });
 
-    let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
+    // DMA1: input buffer → SM0 TX (triggered by DMA0)
+    let dma1 = LaxDmaWrite::new(1, Config {
         high_priority: false,
         word_size: TxSize::_32bit,
-        source: Source {
-            address: core::ptr::null(),
-            increment: true,
-        },
-        destination: Destination {
-            address: txf0.cast_mut().cast(),
-            increment: false,
-        },
+        src_addr: 0,
+        src_incr: true,
+        dest_addr: txf0_addr,
+        dest_incr: false,
         tx_count: SIZE as u32 / 4,
         tx_req: TxReq::Pio0Tx0,
         byte_swap: false,
         start: false,
     });
 
-    let dma0 = LaxDmaWrite::new::<dma::CH0>(Config {
+    // DMA0: write input_buffer address → DMA1 read_addr_trig (triggers DMA1)
+    let dma0 = LaxDmaWrite::new(0, Config {
         high_priority: false,
         word_size: TxSize::_32bit,
-        source: Source {
-            address: input_buffer_addr.as_ptr().cast(),
-            increment: false,
-        },
-        destination: Destination {
-            address: dma1.read_trig_addr().cast_mut().cast(),
-            increment: false,
-        },
+        src_addr: input_buffer_addr.as_ptr() as u32,
+        src_incr: false,
+        dest_addr: dma1.read_addr_trig_register_addr(),
+        dest_incr: false,
         tx_count: 1,
         tx_req: TxReq::Permanent,
         byte_swap: false,
@@ -385,67 +410,65 @@ fn test_with_pio_expand_12times() {
     let input_buffer = [0x5au8; SIZE];
     let mut output_buffer = [0u8; 12 * SIZE];
 
-    let mut pac = rp2040_pac::Peripherals::take().unwrap();
-    let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
+    reset_pio0();
 
-    let _clocks = rp2040_hal::clocks::init_clocks_and_plls(
-        XOSC_CRYSTAL_FREQ,
-        pac.XOSC,
-        pac.CLOCKS,
-        pac.PLL_SYS,
-        pac.PLL_USB,
-        &mut pac.RESETS,
-        &mut watchdog,
-    )
-    .ok()
-    .unwrap();
+    let pio0 = pac::PIO0;
+    let expand_pio = pio_programs::gen_monochrome_expand_program(MonochromeColor::Bpp1);
+    load_pio_program(&expand_pio, 0);
 
-    let expand_times12_pio = pio_programs::gen_monochrome_expand_program(MonochromeColor::Bpp1);
+    // Configure SM0: autopull, autopush, push_thresh=12
+    let sm0 = pio0.sm(0);
+    sm0.clkdiv().write(|w| {
+        w.set_int(1);
+        w.set_frac(0);
+    });
+    sm0.shiftctrl().write(|w| {
+        w.set_autopull(true);
+        w.set_autopush(true);
+        w.set_push_thresh(12);
+        w.set_pull_thresh(0); // 0 = 32 bits
+        w.set_in_shiftdir(false); // left
+        w.set_out_shiftdir(true); // right
+    });
+    sm0.execctrl().write(|w| {
+        w.set_wrap_top(expand_pio.wrap.source);
+        w.set_wrap_bottom(expand_pio.wrap.target);
+    });
+    sm0.instr().write(|w| w.set_instr(0x0000));
 
-    let _dma = pac.DMA.split(&mut pac.RESETS);
-    let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
+    // Enable SM0
+    pio0.ctrl().modify(|w| {
+        w.set_sm_enable(w.sm_enable() | 0b01);
+    });
 
-    let installed_pio = pio.install(&expand_times12_pio).unwrap();
-    let (sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed_pio)
-        .autopull(true)
-        .autopush(true)
-        .build(sm0);
-    sm.start();
-
-    let txf = tx.fifo_address();
-    let rxf = rx.fifo_address();
+    let txf_addr = pio0.txf(0).as_ptr() as u32;
+    let rxf_addr = pio0.rxf(0).as_ptr() as u32;
 
     defmt::info!("input_buffer: {:08b}", input_buffer);
     defmt::info!("output_buffer: {:08b}", output_buffer);
 
-    let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
+    // DMA1: input buffer → SM0 TX
+    let dma1 = LaxDmaWrite::new(1, Config {
         high_priority: false,
         word_size: TxSize::_32bit,
-        source: Source {
-            address: input_buffer.as_ptr(),
-            increment: true,
-        },
-        destination: Destination {
-            address: txf.cast_mut().cast(),
-            increment: false,
-        },
+        src_addr: input_buffer.as_ptr() as u32,
+        src_incr: true,
+        dest_addr: txf_addr,
+        dest_incr: false,
         tx_count: SIZE as u32 / 4,
         tx_req: TxReq::Pio0Tx0,
         byte_swap: false,
         start: false,
     });
 
-    let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
+    // DMA2: SM0 RX → output buffer
+    let dma2 = LaxDmaWrite::new(2, Config {
         high_priority: false,
         word_size: TxSize::_32bit,
-        source: Source {
-            address: rxf.cast(),
-            increment: false,
-        },
-        destination: Destination {
-            address: output_buffer.as_mut_ptr(),
-            increment: true,
-        },
+        src_addr: rxf_addr,
+        src_incr: false,
+        dest_addr: output_buffer.as_mut_ptr() as u32,
+        dest_incr: true,
         tx_count: 12 * SIZE as u32 / 4,
         tx_req: TxReq::Pio0Rx0,
         byte_swap: false,
@@ -470,66 +493,65 @@ fn test_with_pio_expand_dynamic(color: MonochromeColor) {
     let input_buffer: [u8; SIZE] = [0xaa; SIZE];
     let mut output_buffer: [u8; 12 * SIZE] = [0u8; 12 * SIZE];
 
-    let mut pac = rp2040_pac::Peripherals::take().unwrap();
-    let mut watchdog = rp2040_hal::watchdog::Watchdog::new(pac.WATCHDOG);
+    reset_pio0();
 
-    let _clocks = rp2040_hal::clocks::init_clocks_and_plls(
-        XOSC_CRYSTAL_FREQ,
-        pac.XOSC,
-        pac.CLOCKS,
-        pac.PLL_SYS,
-        pac.PLL_USB,
-        &mut pac.RESETS,
-        &mut watchdog,
-    )
-    .ok()
-    .unwrap();
-
-    let _dma = pac.DMA.split(&mut pac.RESETS);
-    let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
-
+    let pio0 = pac::PIO0;
     let expand_pio = pio_programs::gen_monochrome_expand_program(color);
-    let installed_pio = pio.install(&expand_pio).unwrap();
-    let (sm, rx, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed_pio)
-        .autopull(true)
-        .autopush(true)
-        .build(sm0);
-    sm.start();
+    load_pio_program(&expand_pio, 0);
 
-    let txf = tx.fifo_address();
-    let rxf = rx.fifo_address();
+    // Configure SM0: autopull, autopush, push_thresh=12
+    let sm0 = pio0.sm(0);
+    sm0.clkdiv().write(|w| {
+        w.set_int(1);
+        w.set_frac(0);
+    });
+    sm0.shiftctrl().write(|w| {
+        w.set_autopull(true);
+        w.set_autopush(true);
+        w.set_push_thresh(12);
+        w.set_pull_thresh(0); // 0 = 32 bits
+        w.set_in_shiftdir(false); // left
+        w.set_out_shiftdir(true); // right
+    });
+    sm0.execctrl().write(|w| {
+        w.set_wrap_top(expand_pio.wrap.source);
+        w.set_wrap_bottom(expand_pio.wrap.target);
+    });
+    sm0.instr().write(|w| w.set_instr(0x0000));
+
+    // Enable SM0
+    pio0.ctrl().modify(|w| {
+        w.set_sm_enable(w.sm_enable() | 0b01);
+    });
+
+    let txf_addr = pio0.txf(0).as_ptr() as u32;
+    let rxf_addr = pio0.rxf(0).as_ptr() as u32;
 
     defmt::info!("input_buffer: {:08b}", input_buffer);
     defmt::info!("output_buffer: {:08b}", output_buffer);
 
-    let dma1 = LaxDmaWrite::new::<dma::CH1>(Config {
+    // DMA1: input buffer → SM0 TX
+    let dma1 = LaxDmaWrite::new(1, Config {
         high_priority: false,
         word_size: TxSize::_32bit,
-        source: Source {
-            address: input_buffer.as_ptr(),
-            increment: true,
-        },
-        destination: Destination {
-            address: txf.cast_mut().cast(),
-            increment: false,
-        },
+        src_addr: input_buffer.as_ptr() as u32,
+        src_incr: true,
+        dest_addr: txf_addr,
+        dest_incr: false,
         tx_count: SIZE as u32 / 4,
         tx_req: TxReq::Pio0Tx0,
         byte_swap: false,
         start: false,
     });
 
-    let dma2 = LaxDmaWrite::new::<dma::CH2>(Config {
+    // DMA2: SM0 RX → output buffer
+    let dma2 = LaxDmaWrite::new(2, Config {
         high_priority: false,
         word_size: TxSize::_32bit,
-        source: Source {
-            address: rxf.cast(),
-            increment: false,
-        },
-        destination: Destination {
-            address: output_buffer.as_mut_ptr(),
-            increment: true,
-        },
+        src_addr: rxf_addr,
+        src_incr: false,
+        dest_addr: output_buffer.as_mut_ptr() as u32,
+        dest_incr: true,
         tx_count: bpp as u32 * SIZE as u32 / 4,
         tx_req: TxReq::Pio0Rx0,
         byte_swap: false,
@@ -548,26 +570,23 @@ fn test_with_pio_expand_dynamic(color: MonochromeColor) {
 
 // ── Entry point ───────────────────────────────────────────────────────────
 
-#[rp2040_hal::entry]
-fn main() -> ! {
-    defmt::info!(
-        "Board {}, git revision {:x}, ROM version {:x}",
-        rom_data::copyright_string(),
-        rom_data::git_revision(),
-        rom_data::rom_version_number(),
-    );
+#[embassy_executor::main]
+async fn main(_spawner: embassy_executor::Spawner) {
+    let _p = embassy_rp::init(Default::default());
+
+    defmt::info!("DMA test suite starting");
 
     defmt::info!("=== Memory-to-memory DMA tests ===");
     run_mem_to_mem_tests();
 
-    // NOTE: the PIO tests each call Peripherals::take() and therefore
-    // cannot run in the same binary as each other or after
-    // run_mem_to_mem_tests (which does not take peripherals).
-    // Uncomment ONE of the following to run it:
-    //
-    // test_with_pio_invert_twice();
-    // test_with_pio_expand_12times();
-    // test_with_pio_expand_dynamic(MonochromeColor::Bpp1);
+    defmt::info!("=== PIO invert twice test ===");
+    test_with_pio_invert_twice();
+
+    defmt::info!("=== PIO expand 12× test ===");
+    test_with_pio_expand_12times();
+
+    defmt::info!("=== PIO expand dynamic (Bpp1) test ===");
+    test_with_pio_expand_dynamic(MonochromeColor::Bpp1);
 
     defmt::info!("=== All tests done ===");
 

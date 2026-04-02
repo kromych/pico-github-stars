@@ -14,25 +14,23 @@ defmt = "1.0"
 defmt-rtt = "1.1"
 panic-probe = { version = "1.0", features = ["print-defmt"] }
 
-cortex-m = "0.7"
+cortex-m = { version = "0.7", features = ["inline-asm"] }
 cortex-m-rt = "0.7"
-embedded-hal = "1.0"
-fugit = "0.3"
+critical-section = "1.2"
+
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread"] }
+embassy-time = "0.5"
+embassy-rp = { version = "0.10", features = [
+    "unstable-pac",
+    "time-driver",
+    "critical-section-impl",
+    "rp2040",
+    "boot2-generic-03h",
+] }
+
 pio = "0.3"
-pio-proc = "0.3"
 pico-display = { path = "pico-display" }
 pio-programs = { path = "pio-programs" }
-pico_pll_config = "0.1"
-rp2040-boot2 = "0.3"
-rp2040-hal = { git = "https://github.com/rp-rs/rp-hal/", rev = "b3cd286e1bbb6de9ffa071d9b654ab71038df9b0", features = [
-    "binary-info",
-    "critical-section-impl",
-    "rt",
-    "defmt",
-] }
-rp2040-pac = "0.6"
-embedded-graphics = "0.8"
-libm = "0.2"
 
 [[bin]]
 name = "pico-github-stars"
@@ -45,12 +43,27 @@ test = false
 bench = false
 
 [[example]]
+name = "matrix_async"
+test = false
+bench = false
+
+[[example]]
 name = "color_bars"
 test = false
 bench = false
 
 [[example]]
+name = "color_bars_async"
+test = false
+bench = false
+
+[[example]]
 name = "bounce"
+test = false
+bench = false
+
+[[example]]
+name = "bounce_async"
 test = false
 bench = false
 
