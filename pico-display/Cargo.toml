@@ -7,6 +7,11 @@ edition = "2021"
 test = false
 bench = false
 
+[features]
+default = ["rp2040"]
+rp2040 = ["embassy-rp/rp2040"]
+rp2350 = ["embassy-rp/rp235xa"]
+
 [dependencies]
 cortex-m = { version = "0.7", features = ["inline-asm"] }
 defmt = "1.0"
@@ -14,4 +19,4 @@ libm = "0.2"
 pio = "0.3"
 pio-proc = "0.3"
 pio-programs = { path = "../pio-programs" }
-embassy-rp = { version = "0.10", features = ["unstable-pac", "rp2040"] }
+embassy-rp = { version = "0.10", features = ["unstable-pac"] }

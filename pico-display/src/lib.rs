@@ -19,11 +19,21 @@ pub mod lax_dma;
 
 use crate::lax_dma::Config;
 use crate::lax_dma::LaxDmaWrite;
-use crate::lax_dma::TxReq;
+use crate::lax_dma::TreqSel;
 use crate::lax_dma::TxSize;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_rp::pac;
+
+#[cfg(feature = "rp2040")]
+pub fn timer() -> pac::timer::Timer {
+    pac::TIMER
+}
+
+#[cfg(feature = "rp2350")]
+pub fn timer() -> pac::timer::Timer {
+    pac::TIMER0
+}
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[allow(dead_code)]
@@ -823,7 +833,7 @@ where
             dest_addr: sm1_tx_fifo_addr,
             dest_incr: false,
             tx_count: pixel_count,
-            tx_req: TxReq::Pio0Rx0,
+            treq_sel: TreqSel::PIO0_RX0,
             byte_swap: false,
             start: true,
         });
@@ -832,9 +842,9 @@ where
         // Direct modes (RGB565/RGB444): feeds SM1 TX, DREQ = Pio0Tx1.
         // Mono: feeds SM0 TX (color expansion), DREQ = Pio0Tx0.
         let (ch1_dest, ch1_dreq) = if TColor::MODE.is_direct() {
-            (sm1_tx_fifo_addr, TxReq::Pio0Tx1)
+            (sm1_tx_fifo_addr, TreqSel::PIO0_TX1)
         } else {
-            (sm0_tx_fifo_addr, TxReq::Pio0Tx0)
+            (sm0_tx_fifo_addr, TreqSel::PIO0_TX0)
         };
         let color_expand_sm_dma = LaxDmaWrite::new(1, Config {
             high_priority: true,
@@ -844,7 +854,7 @@ where
             dest_addr: ch1_dest,
             dest_incr: false,
             tx_count: Self::FRAME_WORDS as u32,
-            tx_req: ch1_dreq,
+            treq_sel: ch1_dreq,
             byte_swap: false,
             start: false,
         });
@@ -976,7 +986,7 @@ where
     #[inline(always)]
     fn wait_for_vsync(&mut self) {
         while pac::SIO.gpio_in(0).read() & (1 << PIN_VSYNC) != 0 {}
-        self.last_vsync_time = pac::TIMER.timerawl().read();
+        self.last_vsync_time = timer().timerawl().read();
     }
 
     async fn wait_for_vsync_async(&mut self) {
@@ -992,7 +1002,7 @@ where
             }
         })
         .await;
-        self.last_vsync_time = pac::TIMER.timerawl().read();
+        self.last_vsync_time = timer().timerawl().read();
     }
 
     /// Async version of [`set_viewport`](Self::set_viewport). Yields to the

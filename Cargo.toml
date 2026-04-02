@@ -9,6 +9,11 @@ authors = ["kromych"]
 version = "0.1.0"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["rp2040"]
+rp2040 = ["pico-display/rp2040", "embassy-rp/rp2040", "embassy-rp/boot2-generic-03h"]
+rp2350 = ["pico-display/rp2350", "embassy-rp/rp235xa", "embassy-rp/boot2-ram-memcpy"]
+
 [dependencies]
 defmt = "1.0"
 defmt-rtt = "1.1"
@@ -20,16 +25,19 @@ critical-section = "1.2"
 
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread"] }
 embassy-time = "0.5"
+# Chip is selected via features: --features rp2040 (default) or --features rp2350.
+# For rp2350, also update .cargo/config.toml:
+#   target = "thumbv8m.main-none-eabihf"
+#   --chip RP2350 in the probe-rs runner
+# And use memory_rp2350.x instead of memory.x.
 embassy-rp = { version = "0.10", features = [
     "unstable-pac",
     "time-driver",
     "critical-section-impl",
-    "rp2040",
-    "boot2-generic-03h",
 ] }
 
 pio = "0.3"
-pico-display = { path = "pico-display" }
+pico-display = { path = "pico-display", default-features = false }
 pio-programs = { path = "pio-programs" }
 
 [[bin]]

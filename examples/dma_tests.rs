@@ -11,7 +11,7 @@
 use defmt_rtt as _;
 use embassy_rp::pac;
 use panic_probe as _;
-use pico_display::lax_dma::{self, Config, LaxDmaWrite, TxReq, TxSize};
+use pico_display::lax_dma::{self, Config, LaxDmaWrite, TreqSel, TxSize};
 use pico_display::MonochromeColor;
 
 // ── PIO program loading helper ─────────────────────────────────────────────
@@ -101,7 +101,7 @@ fn run_dma_test(ch_id: u8, config: TestConfig) {
         dest_addr: dst.as_mut_ptr() as u32,
         dest_incr: increment_dst,
         tx_count,
-        tx_req: TxReq::Permanent,
+        treq_sel: TreqSel::PERMANENT,
         byte_swap,
         start: false,
     };
@@ -348,7 +348,7 @@ fn test_with_pio_invert_twice() {
         dest_addr: output_buffer.as_mut_ptr() as u32,
         dest_incr: true,
         tx_count: SIZE as u32 / 4,
-        tx_req: TxReq::Pio0Rx1,
+        treq_sel: TreqSel::PIO0_RX1,
         byte_swap: false,
         start: true,
     });
@@ -362,7 +362,7 @@ fn test_with_pio_invert_twice() {
         dest_addr: txf1_addr,
         dest_incr: false,
         tx_count: SIZE as u32 / 4,
-        tx_req: TxReq::Pio0Tx1,
+        treq_sel: TreqSel::PIO0_TX1,
         byte_swap: false,
         start: true,
     });
@@ -376,7 +376,7 @@ fn test_with_pio_invert_twice() {
         dest_addr: txf0_addr,
         dest_incr: false,
         tx_count: SIZE as u32 / 4,
-        tx_req: TxReq::Pio0Tx0,
+        treq_sel: TreqSel::PIO0_TX0,
         byte_swap: false,
         start: false,
     });
@@ -390,7 +390,7 @@ fn test_with_pio_invert_twice() {
         dest_addr: dma1.read_addr_trig_register_addr(),
         dest_incr: false,
         tx_count: 1,
-        tx_req: TxReq::Permanent,
+        treq_sel: TreqSel::PERMANENT,
         byte_swap: false,
         start: false,
     });
@@ -456,7 +456,7 @@ fn test_with_pio_expand_12times() {
         dest_addr: txf_addr,
         dest_incr: false,
         tx_count: SIZE as u32 / 4,
-        tx_req: TxReq::Pio0Tx0,
+        treq_sel: TreqSel::PIO0_TX0,
         byte_swap: false,
         start: false,
     });
@@ -470,7 +470,7 @@ fn test_with_pio_expand_12times() {
         dest_addr: output_buffer.as_mut_ptr() as u32,
         dest_incr: true,
         tx_count: 12 * SIZE as u32 / 4,
-        tx_req: TxReq::Pio0Rx0,
+        treq_sel: TreqSel::PIO0_RX0,
         byte_swap: false,
         start: false,
     });
@@ -539,7 +539,7 @@ fn test_with_pio_expand_dynamic(color: MonochromeColor) {
         dest_addr: txf_addr,
         dest_incr: false,
         tx_count: SIZE as u32 / 4,
-        tx_req: TxReq::Pio0Tx0,
+        treq_sel: TreqSel::PIO0_TX0,
         byte_swap: false,
         start: false,
     });
@@ -553,7 +553,7 @@ fn test_with_pio_expand_dynamic(color: MonochromeColor) {
         dest_addr: output_buffer.as_mut_ptr() as u32,
         dest_incr: true,
         tx_count: bpp as u32 * SIZE as u32 / 4,
-        tx_req: TxReq::Pio0Rx0,
+        treq_sel: TreqSel::PIO0_RX0,
         byte_swap: false,
         start: false,
     });

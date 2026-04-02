@@ -4,7 +4,6 @@
 #![no_main]
 
 use defmt_rtt as _;
-use embassy_rp::pac;
 use panic_probe as _;
 use pico_display::{Display2_8, PicoDisplay, Rgb565};
 
@@ -14,11 +13,12 @@ mod matrix_symbols;
 type MyDisplay = PicoDisplay<Display2_8, Rgb565>;
 
 fn time_us() -> u32 {
-    pac::TIMER.timerawl().read()
+    pico_display::timer().timerawl().read()
 }
 
 fn time_us64() -> u64 {
-    pac::TIMER.timelr().read() as u64 | ((pac::TIMER.timehr().read() as u64) << 32)
+    let t = pico_display::timer();
+    t.timelr().read() as u64 | ((t.timehr().read() as u64) << 32)
 }
 
 #[embassy_executor::main]
